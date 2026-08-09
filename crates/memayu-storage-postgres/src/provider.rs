@@ -1,0 +1,283 @@
+use crate::schema::{current_dimension, set_dimension, table_is_empty};
+use async_trait::async_trait;
+use chrono::Utc;
+use memayu_core::{Memory, StorageError, StorageProvider};
+use pgvector::Vector;
+use sqlx::postgres::{PgPool, PgRow};
+use sqlx::Row;
+
+pub struct PostgresProvider {
+    pool: PgPool,
+    dimension: usize,
+}
+
+impl PostgresProvider {
+    pub async fn connect(database_url: &str, dimension: usize) -> Result<Self, StorageError> {
+        let pool = PgPool::connect(database_url)
+            .await
+            .map_err(|e| StorageError::Other(format!("connect postgres: {e}")))?;
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .map_err(|e| StorageError::Other(format!("run migrations: {e}")))?;
+
+        let stored = current_dimension(&pool).await?;
+        let dim = match stored {
+            Some(d) if d == dimension => d,
+            Some(_) if table_is_empty(&pool).await? => {
+                set_dimension(&pool, dimension).await?;
+                dimension
+            }
+            Some(d) => {
+                return Err(StorageError::DimensionMismatch {
+                    expected: d,
+                    got: dimension,
+                })
+            }
+            None => dimension,
+        };
+
+        Ok(Self {
+            pool,
+            dimension: dim,
+        })
+    }
+
+    fn check_dim(&self, vector: &[f32]) -> Result<(), StorageError> {
+        if vector.len() == self.dimension {
+            Ok(())
+        } else {
+            Err(StorageError::DimensionMismatch {
+                expected: self.dimension,
+                got: vector.len(),
+            })
+        }
+    }
+}
+
+fn memory_from_row(row: &PgRow) -> Result<Memory, StorageError> {
+    let id: uuid::Uuid = row
+        .try_get("id")
+        .map_err(|e| StorageError::Other(format!("read id: {e}")))?;
+    let user_id: String = row
+        .try_get("user_id")
+        .map_err(|e| StorageError::Other(format!("read user_id: {e}")))?;
+    let content: String = row
+        .try_get("content")
+        .map_err(|e| StorageError::Other(format!("read content: {e}")))?;
+    let embedding: Vector = row
+        .try_get("embedding")
+        .map_err(|e| StorageError::Other(format!("read embedding: {e}")))?;
+    let metadata: serde_json::Value = row
+        .try_get("metadata")
+        .map_err(|e| StorageError::Other(format!("read metadata: {e}")))?;
+    let created_at: chrono::DateTime<Utc> = row
+        .try_get("created_at")
+        .map_err(|e| StorageError::Other(format!("read created_at: {e}")))?;
+    let updated_at: chrono::DateTime<Utc> = row
+        .try_get("updated_at")
+        .map_err(|e| StorageError::Other(format!("read updated_at: {e}")))?;
+
+    Ok(Memory {
+        id: id.to_string(),
+        user_id,
+        content,
+        vector: embedding.to_vec(),
+        metadata: serde_json::from_value(metadata).unwrap_or_default(),
+        created_at,
+        updated_at,
+    })
+}
+
+#[async_trait]
+impl StorageProvider for PostgresProvider {
+    async fn save_memory(&self, mem: &Memory) -> Result<(), StorageError> {
+        self.check_dim(&mem.vector)?;
+        let id: uuid::Uuid = mem
+            .id
+            .parse()
+            .map_err(|e| StorageError::Other(format!("invalid memory id {}: {e}", mem.id)))?;
+        let vector = Vector::from(mem.vector.clone());
+        let metadata = serde_json::to_value(&mem.metadata)
+            .map_err(|e| StorageError::Other(format!("serialize metadata: {e}")))?;
+
+        sqlx::query(
+            "INSERT INTO memories (id, user_id, content, embedding, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (id) DO UPDATE SET
+               user_id = EXCLUDED.user_id,
+               content = EXCLUDED.content,
+               embedding = EXCLUDED.embedding,
+               metadata = EXCLUDED.metadata,
+               updated_at = EXCLUDED.updated_at",
+        )
+        .bind(id)
+        .bind(&mem.user_id)
+        .bind(&mem.content)
+        .bind(&vector)
+        .bind(metadata)
+        .bind(mem.created_at)
+        .bind(mem.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Other(format!("save memory: {e}")))?;
+        Ok(())
+    }
+
+    async fn search_memory(
+        &self,
+        user_id: &str,
+        vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(Memory, f32)>, StorageError> {
+        self.check_dim(vector)?;
+        let q = Vector::from(vector.to_vec());
+        let rows = sqlx::query(
+            "SELECT id, user_id, content, embedding, metadata, created_at, updated_at,
+                    (embedding <=> $1) AS score
+             FROM memories WHERE user_id = $2
+             ORDER BY embedding <=> $1
+             LIMIT $3",
+        )
+        .bind(&q)
+        .bind(user_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Other(format!("search memories: {e}")))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let distance: f64 = row
+                .try_get("score")
+                .map_err(|e| StorageError::Other(format!("read score: {e}")))?;
+            let mut mem = memory_from_row(&row)?;
+            let embedding: Vector = row
+                .try_get("embedding")
+                .map_err(|e| StorageError::Other(format!("read embedding: {e}")))?;
+            mem.vector = embedding.to_vec();
+            out.push((mem, (1.0 - distance) as f32));
+        }
+        Ok(out)
+    }
+
+    async fn list_memories(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Memory>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, content, embedding, metadata, created_at, updated_at
+             FROM memories WHERE user_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Other(format!("list memories: {e}")))?;
+        rows.iter().map(memory_from_row).collect()
+    }
+
+    async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
+        let id: uuid::Uuid = memory_id
+            .parse()
+            .map_err(|e| StorageError::Other(format!("invalid memory id {memory_id}: {e}")))?;
+        let row = sqlx::query(
+            "SELECT id, user_id, content, embedding, metadata, created_at, updated_at
+             FROM memories WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Other(format!("get memory: {e}")))?;
+        row.map(|r| memory_from_row(&r))
+            .ok_or_else(|| StorageError::Other(format!("memory {memory_id} not found")))?
+    }
+
+    async fn delete_memory(&self, memory_id: &str) -> Result<(), StorageError> {
+        let id: uuid::Uuid = memory_id
+            .parse()
+            .map_err(|e| StorageError::Other(format!("invalid memory id {memory_id}: {e}")))?;
+        sqlx::query("DELETE FROM memories WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Other(format!("delete memory: {e}")))?;
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+mod tests {
+    use super::*;
+    use memayu_core::Memory;
+    use std::collections::HashMap;
+    use std::env;
+
+    fn test_url() -> Option<String> {
+        env::var("MEMAYU_TEST_DATABASE_URL").ok()
+    }
+
+    #[tokio::test]
+    async fn crud_roundtrip() {
+        let url = match test_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let provider = PostgresProvider::connect(&url, 3).await.unwrap();
+        let m = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "u1".into(),
+            content: "User lives in Jakarta".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: HashMap::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        provider.save_memory(&m).await.unwrap();
+        let list = provider.list_memories("u1", 10).await.unwrap();
+        assert_eq!(list.len(), 1);
+        provider.delete_memory(&m.id).await.unwrap();
+        assert!(provider.list_memories("u1", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_returns_ranked_scores() {
+        let url = match test_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let provider = PostgresProvider::connect(&url, 3).await.unwrap();
+        let m1 = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "u1".into(),
+            content: "jakarta".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: HashMap::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let m2 = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "u1".into(),
+            content: "bandung".into(),
+            vector: vec![0.0, 1.0, 0.0],
+            metadata: HashMap::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        provider.save_memory(&m1).await.unwrap();
+        provider.save_memory(&m2).await.unwrap();
+        let results = provider
+            .search_memory("u1", &[0.9, 0.1, 0.0], 3)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0.content, "jakarta");
+        assert!(results[0].1 > results[1].1, "similarity descending");
+        provider.delete_memory(&m1.id).await.unwrap();
+        provider.delete_memory(&m2.id).await.unwrap();
+    }
+}

@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/memayu-core",
+    "crates/memayu-config",
+    "crates/memayu-storage-libsql",
+    "crates/memayu-storage-postgres",
+    "crates/memayu-llm-client",
+    "crates/memayu-api",
+    "crates/memayu-web",
+    "crates/memayu-mcp",
+    "bin/memayu",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

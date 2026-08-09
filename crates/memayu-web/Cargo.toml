@@ -1,0 +1,22 @@
+[package]
+name = "memayu-web"
+version.workspace = true
+edition.workspace = true
+description = "Memayu self-hosted dashboard — pure server-rendered HTMX frontend with zero direct DB access"
+
+[dependencies]
+memayu-core = { path = "../memayu-core" }
+memayu-config = { path = "../memayu-config" }
+memayu-api = { path = "../memayu-api" }
+memayu-llm-client = { path = "../memayu-llm-client" }
+axum = { version = "0.8", features = ["macros"] }
+maud = "0.27"
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+rust-embed = { version = "8", features = ["include-exclude"] }
+mime_guess = "2"
+
+[dev-dependencies]
+memayu-storage-libsql = { path = "../memayu-storage-libsql" }
+tokio = { version = "1", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }

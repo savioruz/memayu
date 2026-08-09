@@ -1,0 +1,4 @@
+# Clippy configuration
+# See https://doc.rust-lang.org/clippy/configuration.html
+
+# Warn on any warning — CI treats warnings as errors via `-D warnings`.

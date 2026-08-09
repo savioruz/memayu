@@ -1,0 +1,31 @@
+[package]
+name = "memayu-api"
+version.workspace = true
+edition.workspace = true
+description = "Memayu Axum HTTP API — auth, memory, API keys, request logging"
+
+[dependencies]
+memayu-core = { path = "../memayu-core" }
+memayu-config = { path = "../memayu-config" }
+memayu-llm-client = { path = "../memayu-llm-client" }
+axum = { version = "0.8", features = ["macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+libsql = { version = "0.9", features = ["replication"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros"] }
+utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+utoipa-axum = "0.2"
+utoipa-scalar = { version = "0.3", features = ["axum"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+async-trait = "0.1"

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Pre-commit hook: format check, lint, and test.
+set -e
+
+echo "[pre-commit] fmt --check"
+cargo fmt --all -- --check
+
+echo "[pre-commit] clippy"
+cargo clippy --all-targets -- -D warnings
+
+echo "[pre-commit] test"
+cargo test

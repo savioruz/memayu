@@ -1,0 +1,19 @@
+[package]
+name = "memayu-llm-client"
+version.workspace = true
+edition.workspace = true
+description = "Memayu OpenAI-compatible HTTP client for LLM extraction and embedding"
+
+[dependencies]
+memayu-core = { path = "../memayu-core" }
+memayu-config = { path = "../memayu-config" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+http-body-util = "0.1"

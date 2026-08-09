@@ -1,0 +1,20 @@
+[package]
+name = "memayu"
+version.workspace = true
+edition.workspace = true
+description = "Memayu self-hosted single binary"
+
+[dependencies]
+memayu-core = { path = "../../crates/memayu-core" }
+memayu-config = { path = "../../crates/memayu-config" }
+memayu-storage-libsql = { path = "../../crates/memayu-storage-libsql" }
+memayu-storage-postgres = { path = "../../crates/memayu-storage-postgres" }
+memayu-llm-client = { path = "../../crates/memayu-llm-client" }
+memayu-api = { path = "../../crates/memayu-api" }
+memayu-web = { path = "../../crates/memayu-web" }
+memayu-mcp = { path = "../../crates/memayu-mcp" }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }

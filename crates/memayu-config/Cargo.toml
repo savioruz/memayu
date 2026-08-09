@@ -1,0 +1,10 @@
+[package]
+name = "memayu-config"
+version.workspace = true
+edition.workspace = true
+description = "Memayu config/env loading & validation"
+
+[dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+utoipa = { version = "5", optional = true }
