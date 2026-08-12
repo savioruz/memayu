@@ -85,7 +85,7 @@ impl Config {
                     })
                 })
                 .transpose()?
-                .unwrap_or(0.85);
+                .unwrap_or(0.65);
             return Ok(Self {
                 storage: StorageConfig {
                     backend: StorageBackend::Libsql,
@@ -188,7 +188,7 @@ impl Config {
                     })
                 })
                 .transpose()?
-                .unwrap_or(0.85),
+                .unwrap_or(0.55),
             dimension: env
                 .get("MEMAYU_EMBEDDING_DIM")
                 .map(|v| {
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(cfg.storage.backend, StorageBackend::Libsql);
         assert_eq!(cfg.storage.libsql_path, "memayu.db");
         assert_eq!(cfg.server.port, 8080);
-        assert!((cfg.similarity_threshold - 0.85).abs() < 1e-6);
+        assert!((cfg.similarity_threshold - 0.55).abs() < 1e-6);
         assert_eq!(cfg.dimension, None);
     }
 

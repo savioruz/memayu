@@ -1,7 +1,7 @@
 use crate::{CoreError, ExtractionResult, Memory, Message};
 use serde::Deserialize;
 
-pub const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.85;
+pub const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.55;
 
 /// Stable system prompt, byte-identical across calls (cache-friendly, PRD-07 §4.2).
 pub const SYSTEM_PROMPT: &str = r#"You are the extraction engine of a personal memory system.
@@ -87,11 +87,18 @@ fn parse_raw(raw: &str) -> Result<RawExtraction, CoreError> {
     })
 }
 
-/// Filter candidate memories to those with score >= threshold.
-pub fn above_threshold(candidates: &[(Memory, f32)], threshold: f32) -> Vec<&(Memory, f32)> {
+pub fn above_threshold(candidates: &[(Memory, f32)], floor: f32) -> Vec<&(Memory, f32)> {
+    let Some(top) = candidates
+        .iter()
+        .map(|(_, s)| *s)
+        .max_by(|a, b| a.total_cmp(b))
+    else {
+        return Vec::new();
+    };
+    let cut = floor.max(top * 0.80);
     candidates
         .iter()
-        .filter(|(_, score)| *score >= threshold)
+        .filter(|(_, score)| *score >= cut)
         .collect()
 }
 
@@ -167,13 +174,34 @@ mod tests {
     #[test]
     fn threshold_filters_candidates() {
         let cands = vec![
-            (mem("m1", "a"), 0.9_f32),
-            (mem("m2", "b"), 0.5_f32),
-            (mem("m3", "c"), 0.85_f32),
+            (mem("m1", "a"), 0.95_f32),
+            (mem("m2", "b"), 0.72_f32),
+            (mem("m3", "c"), 0.78_f32),
         ];
-        let kept = above_threshold(&cands, 0.85);
+        let kept = above_threshold(&cands, 0.55);
         let ids: Vec<&str> = kept.iter().map(|(m, _)| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["m1", "m3"]);
+        assert_eq!(
+            ids,
+            vec!["m1", "m3"],
+            "m2 at 0.72 < cut 0.76 should be dropped"
+        );
+    }
+
+    #[test]
+    fn threshold_empty_input_gives_empty_output() {
+        let cands: Vec<(Memory, f32)> = vec![];
+        let kept = above_threshold(&cands, 0.55);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn threshold_all_pass_when_top_is_low() {
+        let cands = vec![
+            (mem("m1", "bandung"), 0.64_f32),
+            (mem("m2", "coding"), 0.56_f32),
+        ];
+        let kept = above_threshold(&cands, 0.55);
+        assert_eq!(kept.len(), 2);
     }
 
     #[test]

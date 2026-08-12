@@ -1,4 +1,4 @@
-use crate::extraction::{self, DEFAULT_SIMILARITY_THRESHOLD};
+use crate::extraction;
 use crate::{
     CoreError, EmbedderProvider, ExtractionDecision, ExtractionResult, LlmProvider, Memory,
     Message, Metadata, StorageError, StorageProvider,
@@ -11,7 +11,6 @@ pub struct MemoryService {
     storage: Arc<dyn StorageProvider>,
     embedder: Arc<dyn EmbedderProvider>,
     llm: Arc<dyn LlmProvider>,
-    similarity_threshold: f32,
 }
 
 impl MemoryService {
@@ -24,21 +23,20 @@ impl MemoryService {
             storage,
             embedder,
             llm,
-            similarity_threshold: DEFAULT_SIMILARITY_THRESHOLD,
         }
     }
 
+    #[deprecated(note = "similarity_threshold is no longer used; use new()")]
     pub fn with_similarity_threshold(
         storage: Arc<dyn StorageProvider>,
         embedder: Arc<dyn EmbedderProvider>,
         llm: Arc<dyn LlmProvider>,
-        threshold: f32,
+        _threshold: f32,
     ) -> Self {
         Self {
             storage,
             embedder,
             llm,
-            similarity_threshold: threshold,
         }
     }
 
@@ -56,8 +54,8 @@ impl MemoryService {
             .search_memory(user_id, &vector, SEARCH_LIMIT)
             .await?;
 
-        let plausible: Vec<&(Memory, f32)> =
-            extraction::above_threshold(&candidates, self.similarity_threshold);
+        // Always send all candidates to the LLM; let it decide ADD vs UPDATE.
+        let plausible: Vec<&(Memory, f32)> = candidates.iter().collect();
 
         let messages: Vec<Message> = extraction::build_prompt(content, &plausible);
         let result: ExtractionResult = self.llm.extract(&messages).await?;
@@ -343,5 +341,65 @@ mod tests {
 
         svc.delete_memory("m1").await.unwrap();
         assert!(svc.list_memories("u1", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn merge_conceptually_conflicting_fact_despite_low_similarity() {
+        // "favorite language is Rust" then "prefers Go for backend"
+        // -> UPDATE, not ADD. Embeddings may differ, but the LLM
+        // must see the candidate and judge the conceptual conflict.
+        let storage = MockStorage {
+            rows: Mutex::new(vec![mem(
+                "m1",
+                "u1",
+                "Favorite programming language is Rust",
+            )]),
+            score: 0.5, // low similarity but conceptually related
+        };
+        let llm = MockLlm::scripted(vec![
+            r#"{"decision":"update","memory_id":"m1","content":"Favorite programming language is Go (for backend)"}"#,
+        ]);
+        let svc = service_with(storage, llm);
+
+        let result = svc
+            .add_memory("u1", "Prefers Go for backend work", &HashMap::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.id, "m1", "must update m1, not create a new memory");
+        assert!(
+            result.content.contains("Go"),
+            "content must reflect the update to Go"
+        );
+        let rows = svc.list_memories("u1", 10).await.unwrap();
+        assert_eq!(rows.len(), 1, "must be exactly 1 memory after update");
+    }
+
+    #[tokio::test]
+    async fn unrelated_fact_stays_separate() {
+        // "lives in Jakarta" then "prefers dark mode" -> 2 separate memories.
+        let storage = MockStorage {
+            rows: Mutex::new(vec![mem("m1", "u1", "User lives in Jakarta")]),
+            score: 0.5,
+        };
+        let llm = MockLlm::scripted(vec![
+            r#"{"decision":"add","memory_id":null,"content":"User prefers dark mode"}"#,
+        ]);
+        let svc = service_with(storage, llm);
+
+        let result = svc
+            .add_memory("u1", "Prefers dark mode in editors", &HashMap::new())
+            .await
+            .unwrap();
+
+        assert_ne!(
+            result.id, "m1",
+            "must be a new memory, not overwrite Jakarta"
+        );
+        let rows = svc.list_memories("u1", 10).await.unwrap();
+        assert_eq!(rows.len(), 2, "must have 2 separate memories");
+        let contents: Vec<&str> = rows.iter().map(|m| m.content.as_str()).collect();
+        assert!(contents.iter().any(|c| c.contains("Jakarta")));
+        assert!(contents.iter().any(|c| c.contains("dark mode")));
     }
 }
