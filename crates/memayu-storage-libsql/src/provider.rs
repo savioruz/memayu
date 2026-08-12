@@ -40,6 +40,21 @@ impl LibsqlProvider {
 }
 const COLUMNS: &str = "id, user_id, content, embedding, metadata, created_at, updated_at";
 
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let (dot, norm_a, norm_b) = a
+        .iter()
+        .zip(b.iter())
+        .fold((0.0f32, 0.0f32, 0.0f32), |(d, na, nb), (&x, &y)| {
+            (d + x * y, na + x * x, nb + y * y)
+        });
+    let denom = (norm_a * norm_b).sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        (dot / denom).clamp(-1.0, 1.0)
+    }
+}
+
 #[async_trait]
 impl StorageProvider for LibsqlProvider {
     async fn save_memory(&self, mem: &Memory) -> Result<(), StorageError> {
@@ -95,18 +110,19 @@ impl StorageProvider for LibsqlProvider {
             .await
             .map_err(|e| StorageError::Other(format!("iterate search: {e}")))?
         {
-            // vector_distance_cos returns cosine DISTANCE (0 = identical);
-            // the core contract is SIMILARITY (1 = identical, thresholded at 0.85).
-            let distance: f64 = row
-                .get(7)
-                .map_err(|e| StorageError::Other(format!("read score: {e}")))?;
             let mut mem = memory_from_row(&row)?;
             mem.vector = crate::row::blob_f32(
                 &row.get::<Vec<u8>>(3)
                     .map_err(|e| StorageError::Other(format!("read vector from search: {e}")))?,
             );
-            out.push((mem, (1.0 - distance) as f32));
+            // Compute true cosine similarity from the returned vectors.
+            // vector_distance_cos is only used for ORDER BY (ANN index scan);
+            // the actual score is computed directly from the vectors here.
+            let similarity = cosine_similarity(vector, &mem.vector);
+            out.push((mem, similarity));
         }
+        // Re-sort by similarity descending since we computed our own scores.
+        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(out)
     }
 

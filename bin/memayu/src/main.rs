@@ -104,10 +104,9 @@ async fn build_service(config: &Config) -> Result<Arc<MemoryService>, Box<dyn st
     };
 
     let llm = memayu_api::LlmConfigProvider::new(registry.clone());
-    Ok(Arc::new(MemoryService::with_similarity_threshold(
+    Ok(Arc::new(MemoryService::new(
         storage,
         Arc::new(embedder),
         Arc::new(llm),
-        config.similarity_threshold,
     )))
 }
