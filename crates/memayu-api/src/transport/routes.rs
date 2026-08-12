@@ -47,11 +47,7 @@ pub fn build(
     service: Arc<crate::MemoryService>,
     registry: crate::modules::providers::service::ConfigRegistry,
 ) -> Router {
-    let state = ApiState {
-        db: db.clone(),
-        service,
-        provider_configs: registry,
-    };
+    let state = ApiState::new(db.clone(), service, registry);
 
     // OpenAPI memory routes (protected by auth)
     let (memory_routes, openapi_spec) = {
@@ -73,7 +69,7 @@ pub fn build(
         middleware::docs_auth_redirect,
     ));
 
-    // Auth routes (public — /api prefix)
+    // Auth routes (public — /api prefix) — with IP-based rate limiting
     let auth_routes = Router::new()
         .route("/api/auth/setup", post(handlers::auth::post_setup))
         .route("/api/auth/login", post(handlers::auth::post_login))
@@ -81,7 +77,11 @@ pub fn build(
         .route(
             "/api/auth/check-setup",
             get(handlers::api_keys::check_setup),
-        );
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_rate_limiter,
+        ));
 
     // Provider config routes (protected by auth)
     let provider_routes = Router::new().route(
@@ -104,12 +104,16 @@ pub fn build(
         get(handlers::request_logs::get_request_logs),
     );
 
-    // All protected routes
+    // All protected routes — with API-key/session rate limiting
     let protected = Router::new()
         .merge(memory_routes)
         .merge(provider_routes)
         .merge(api_key_routes)
         .merge(request_log_routes)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::api_rate_limiter,
+        ))
         .route_layer(axum::middleware::from_fn_with_state(
             state.db.clone(),
             middleware::auth_middleware,
@@ -119,10 +123,13 @@ pub fn build(
             middleware::api_request_logger,
         ));
 
-    // Merge public + protected
+    // Merge public + protected — security headers + CORS + request ID on the outermost layer
     Router::new()
         .merge(auth_routes)
         .merge(docs_routes)
         .merge(protected)
+        .layer(axum::middleware::from_fn(middleware::security_headers))
+        .layer(axum::middleware::from_fn(middleware::cors_middleware))
+        .layer(axum::middleware::from_fn(middleware::request_id))
         .with_state(state)
 }

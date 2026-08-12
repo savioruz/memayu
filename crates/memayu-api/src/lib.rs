@@ -19,8 +19,10 @@ pub use modules::providers::service::{
 };
 pub use modules::request_logs::model::RequestLog;
 pub use transport::middleware::{
-    api_request_logger, auth_middleware, docs_auth_redirect, AccountId, ApiState,
+    api_rate_limiter, api_request_logger, auth_middleware, auth_rate_limiter, docs_auth_redirect,
+    security_headers, AccountId, ApiState,
 };
+pub use transport::rate_limiter::{RateLimitConfig, RateLimiter};
 pub use web_services::WebServices;
 
 /// Build the full API router. Delegates to transport::routes::build().

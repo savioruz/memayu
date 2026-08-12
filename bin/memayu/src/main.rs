@@ -54,10 +54,15 @@ async fn cmd_serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn cmd_mcp(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn MemoryBackend> = if let Some(api_url) = config.api_url {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .expect("reqwest::Client should build with timeouts");
         Arc::new(Backend::Cloud {
             base_url: api_url,
             api_key: config.api_key,
-            client: reqwest::Client::new(),
+            client,
         })
     } else {
         let service = build_service(&config).await?;
