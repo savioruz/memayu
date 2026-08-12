@@ -15,6 +15,7 @@ pub struct AddMemoryResponse {
     pub status: String,
     pub memory_id: String,
     pub dimension: usize,
+    pub metadata: Metadata,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -38,6 +39,7 @@ pub struct SearchResult {
     pub memory_id: String,
     pub content: String,
     pub score: f32,
+    pub metadata: Metadata,
     pub created_at: DateTime<Utc>,
 }
 
@@ -60,6 +62,7 @@ pub struct ListMemoryResponse {
 pub struct ListedMemory {
     pub memory_id: String,
     pub content: String,
+    pub metadata: Metadata,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -76,4 +79,5 @@ pub struct UpdateMemoryResponse {
     pub status: String,
     pub memory_id: String,
     pub content: String,
+    pub metadata: Metadata,
 }
