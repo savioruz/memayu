@@ -12,7 +12,7 @@ fn test_storage_config() -> StorageConfig {
     StorageConfig {
         backend: memayu_config::StorageBackend::Libsql,
         libsql_path: ":memory:".to_string(),
-        postgres_url: None,
+        database_url: None,
     }
 }
 

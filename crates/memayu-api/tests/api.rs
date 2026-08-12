@@ -114,7 +114,7 @@ mod tests {
         let storage = StorageConfig {
             backend: StorageBackend::Libsql,
             libsql_path: ":memory:".to_string(),
-            postgres_url: None,
+            database_url: None,
         };
         let db = open_db(&storage).await.unwrap();
         let registry = ConfigRegistry::new(test_config(), test_config());
