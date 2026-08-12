@@ -183,7 +183,81 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["dimension"], 3);
+        assert_eq!(parsed["metadata"]["source"], "test");
         assert!(parsed["memory_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn metadata_round_trips_in_search_and_list() {
+        let (app, cookie) = setup_and_login().await;
+
+        // Add a memory with metadata
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memories/add")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(
+                        r#"{"content":"User lives in Jakarta","metadata":{"source":"telegram","tag":"location"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // add response echoes metadata
+        assert_eq!(parsed["metadata"]["source"], "telegram");
+        assert_eq!(parsed["metadata"]["tag"], "location");
+
+        // Search: verify metadata in results (mock LLM normalizes to "User prefers coffee")
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memories/search")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(r#"{"query":"coffee","limit":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let results = parsed["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["metadata"]["source"], "telegram");
+        assert_eq!(results[0]["metadata"]["tag"], "location");
+
+        // List: verify metadata in list results
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memories/list?limit=100")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let memories = parsed["memories"].as_array().unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0]["metadata"]["source"], "telegram");
+        assert_eq!(memories[0]["metadata"]["tag"], "location");
     }
 
     #[tokio::test]

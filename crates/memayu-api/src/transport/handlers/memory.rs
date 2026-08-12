@@ -41,6 +41,7 @@ pub async fn add_memory(
             status: "success".into(),
             memory_id: mem.id,
             dimension: mem.vector.len(),
+            metadata: mem.metadata,
         }),
     ))
 }
@@ -79,6 +80,7 @@ pub async fn search_memory(
                 memory_id: m.id,
                 content: m.content,
                 score,
+                metadata: m.metadata,
                 created_at: m.created_at,
             })
             .collect(),
@@ -110,6 +112,7 @@ pub async fn list_memories(
             .map(|m| ListedMemory {
                 memory_id: m.id,
                 content: m.content,
+                metadata: m.metadata,
                 created_at: m.created_at,
                 updated_at: m.updated_at,
             })
@@ -166,5 +169,6 @@ pub async fn update_memory(
         status: "success".into(),
         memory_id: mem.id,
         content: mem.content,
+        metadata: mem.metadata,
     }))
 }
