@@ -69,8 +69,8 @@ pub fn run_wizard() -> Result<String, Box<dyn std::error::Error>> {
 
     // ── Behavior ──
     println!("{}", console::style("── Behavior ──").bold().dim());
-    let sim_str = prompt("Similarity threshold (0.0-1.0)", "0.85");
-    let similarity_threshold: f32 = sim_str.parse().unwrap_or(0.85);
+    let sim_str = prompt("Similarity threshold (0.0-1.0)", "0.65");
+    let similarity_threshold: f32 = sim_str.parse().unwrap_or(0.65);
 
     // ── Build ConfigFile and serialize ──
     let cf = ConfigFile {
@@ -291,9 +291,9 @@ pub fn run_wizard_preseed(skip_intro: bool) -> Result<String, Box<dyn std::error
         .and_then(|e| e.behavior.as_ref())
         .and_then(|b| b.similarity_threshold)
         .map(|t| t.to_string())
-        .unwrap_or_else(|| "0.85".into());
+        .unwrap_or_else(|| "0.65".into());
     let sim_str = prompt("Similarity threshold (0.0-1.0)", &prev_sim);
-    let similarity_threshold: f32 = sim_str.parse().unwrap_or(0.85);
+    let similarity_threshold: f32 = sim_str.parse().unwrap_or(0.65);
 
     // ── Build ConfigFile and serialize ──
     let cf = ConfigFile {

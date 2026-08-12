@@ -317,7 +317,7 @@ impl Config {
             })
             .transpose()?
             .or_else(|| file.behavior.as_ref().and_then(|b| b.similarity_threshold))
-            .unwrap_or(0.85);
+            .unwrap_or(0.65);
 
         let dim = env
             .get("MEMAYU_EMBEDDING_DIM")
@@ -471,7 +471,7 @@ fn cloud_config(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
             })
         })
         .transpose()?
-        .unwrap_or(0.85);
+        .unwrap_or(0.65);
     Ok(Config {
         storage: StorageConfig {
             backend: StorageBackend::Libsql,
@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(cfg.storage.backend, StorageBackend::Libsql);
         assert_eq!(cfg.storage.libsql_path, "./memayu.db");
         assert_eq!(cfg.server.port, 18080);
-        assert!((cfg.similarity_threshold - 0.85).abs() < 1e-6);
+        assert!((cfg.similarity_threshold - 0.65).abs() < 1e-6);
         assert_eq!(cfg.dimension, None);
     }
 
@@ -725,7 +725,7 @@ mod tests {
         let cfg = Config::merge(Some(cf), &HashMap::new()).unwrap();
         assert_eq!(cfg.storage.backend, StorageBackend::Libsql);
         assert_eq!(cfg.server.port, 18080);
-        assert!((cfg.similarity_threshold - 0.85).abs() < 1e-6);
+        assert!((cfg.similarity_threshold - 0.65).abs() < 1e-6);
     }
 
     #[test]
@@ -750,7 +750,7 @@ mod tests {
                 bind_addr: "127.0.0.1".into(),
                 port: 18080,
             },
-            similarity_threshold: 0.85,
+            similarity_threshold: 0.65,
             dimension: None,
             api_url: None,
             api_key: None,
