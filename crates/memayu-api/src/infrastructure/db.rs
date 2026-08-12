@@ -24,7 +24,7 @@ impl DbClient {
             }
             memayu_config::StorageBackend::Postgres => {
                 let url = config
-                    .postgres_url
+                    .database_url
                     .as_deref()
                     .ok_or_else(|| "missing postgres url for api".to_string())?;
                 let pool = sqlx::PgPool::connect(url)

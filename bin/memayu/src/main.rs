@@ -1,25 +1,105 @@
-use memayu_config::{Config, StorageBackend};
+mod wizard;
+
+use memayu_config::{config_path, Config, StorageBackend};
 use memayu_core::{EmbedderProvider, MemoryService, StorageProvider};
 use memayu_mcp::{Backend, MemoryBackend};
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load()?;
-
     let mut args = std::env::args();
     let _bin = args.next();
-    let subcommand = args.next().unwrap_or_else(|| "serve".into());
+    let subcommand = args.next().unwrap_or_else(|| "auto".into());
 
     match subcommand.as_str() {
-        "serve" => cmd_serve(config).await,
-        "mcp" => cmd_mcp(config).await,
+        "serve" | "mcp" => {
+            // Load config (file + env merge)
+            let config = Config::load()?;
+            match subcommand.as_str() {
+                "serve" => cmd_serve(config).await?,
+                "mcp" => cmd_mcp(config).await?,
+                _ => unreachable!(),
+            }
+        }
+        "setup" => {
+            wizard::run_wizard_preseed(true)?;
+        }
+        "config" => {
+            let sub = args.next().unwrap_or_else(|| "show".into());
+            match sub.as_str() {
+                "show" => {
+                    let config = Config::load()?;
+                    println!("Config file: {}", config_path().display());
+                    println!();
+                    print!("{}", config.show());
+                }
+                "check" => {
+                    let config = Config::load()?;
+                    let issues = config.check();
+                    if issues.is_empty() {
+                        println!("{} Config is valid.", console::style("✔").green().bold());
+                    } else {
+                        eprintln!("{} Config has issues:\n", console::style("✘").red().bold());
+                        for issue in &issues {
+                            eprintln!("  • {issue}");
+                        }
+                        std::process::exit(1);
+                    }
+                }
+                other => {
+                    eprintln!("unknown config subcommand: {other}");
+                    eprintln!("usage: memayu config <show|check>");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "auto" => {
+            // First-run: no subcommand given. Check if config file exists.
+            // If not → run wizard; otherwise → serve.
+            let cp = config_path();
+            if cp.exists() {
+                let config = Config::load()?;
+                cmd_serve(config).await?;
+            } else {
+                // Check if env vars provide enough
+                match Config::load() {
+                    Ok(config) => {
+                        // Env vars work — serve
+                        println!(
+                            "[memayu] using env vars (no config file at {})",
+                            cp.display()
+                        );
+                        cmd_serve(config).await?;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} No config file found at {}, and env vars insufficient: {e}",
+                            console::style("→").yellow().bold(),
+                            cp.display()
+                        );
+                        println!();
+                        println!("{}", console::style("Starting setup wizard…").cyan());
+                        println!();
+                        wizard::run_wizard()?;
+                        println!();
+                        println!(
+                            "{}",
+                            console::style("Starting server with new config…").cyan()
+                        );
+                        let config = Config::load()?;
+                        cmd_serve(config).await?;
+                    }
+                }
+            }
+        }
         other => {
             eprintln!("unknown subcommand: {other}");
-            eprintln!("usage: memayu <serve|mcp>");
+            eprintln!("usage: memayu [serve|mcp|setup|config]");
             std::process::exit(1);
         }
     }
+
+    Ok(())
 }
 
 // ── serve ──
@@ -94,7 +174,7 @@ async fn build_service(config: &Config) -> Result<Arc<MemoryService>, Box<dyn st
             memayu_storage_postgres::PostgresProvider::connect(
                 config
                     .storage
-                    .postgres_url
+                    .database_url
                     .as_deref()
                     .ok_or("missing postgres url")?,
                 detected_dim,
