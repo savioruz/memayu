@@ -1,5 +1,6 @@
 pub mod handlers;
 pub mod middleware;
+pub mod rate_limiter;
 pub mod routes;
 
 use crate::error::ApiError;

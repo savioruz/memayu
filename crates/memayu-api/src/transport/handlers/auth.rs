@@ -10,11 +10,20 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 fn session_cookie_header(token: &str) -> String {
+    let secure = if std::env::var("MEMAYU_BEHIND_TLS")
+        .map(|s| s == "1" || s == "true")
+        .unwrap_or(false)
+    {
+        "; Secure"
+    } else {
+        ""
+    };
     format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
         auth_service::SESSION_COOKIE,
         token,
         auth_service::SESSION_DURATION_SECS,
+        secure,
     )
 }
 
