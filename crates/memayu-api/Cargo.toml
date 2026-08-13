@@ -17,7 +17,7 @@ sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
-libsql = { version = "0.9", features = ["replication"] }
+libsql = { version = "0.9", default-features = false, features = ["core"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros"] }
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 utoipa-axum = "0.2"
