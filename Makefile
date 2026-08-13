@@ -1,4 +1,4 @@
-.PHONY: all help build test test-integration lint fmt fmt-check audit check release clean setup dev
+.PHONY: all help build test test-integration lint fmt fmt-check audit check release clean setup dev dev-web
 
 all: check
 
@@ -11,14 +11,14 @@ setup: ## One-time setup (git hooks)
 
 ##@ Build
 
-build: ## Build (debug)
+build: ## Build (debug, default features)
 	cargo build
 
-check: ## Check-only (fast feedback)
-	cargo check --all-targets
+check: ## Check-only (fast feedback, all features)
+	cargo check --workspace --all-targets --all-features
 
-release: ## Build release binary
-	cargo build --release
+release: ## Build release binary (all features)
+	cargo build --release --all-features
 
 ##@ Tests
 
@@ -44,8 +44,11 @@ audit: ## Scan dependencies for known vulnerabilities
 
 ##@ Development
 
-dev: ## Run dashboard with provider config (needs MEMAYU_LLM_*/MEMAYU_EMBEDDER_*)
-	@scripts/dev.sh $(if $(PORT),$(PORT),)
+dev: ## Run default frontend (TUI) with hot reload
+	@scripts/dev.sh tui
+
+dev-web: ## Run web dashboard with hot reload (PORT overridable)
+	@scripts/dev.sh web $(if $(PORT),$(PORT),)
 
 clean: ## Clean build artifacts
 	cargo clean

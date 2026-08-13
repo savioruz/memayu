@@ -1,8 +1,15 @@
+#[cfg(any(feature = "tui", feature = "mcp"))]
+mod service;
+#[cfg(feature = "tui")]
+mod tui;
 mod wizard;
 
-use memayu_config::{config_path, Config, StorageBackend};
-use memayu_core::{EmbedderProvider, MemoryService, StorageProvider};
-use memayu_mcp::{Backend, MemoryBackend};
+#[cfg(feature = "web")]
+use memayu_config::StorageBackend;
+use memayu_config::{config_path, Config};
+#[cfg(feature = "web")]
+use memayu_core::MemoryService;
+#[cfg(any(feature = "web", feature = "mcp"))]
 use std::sync::Arc;
 
 #[tokio::main]
@@ -12,14 +19,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = args.next().unwrap_or_else(|| "auto".into());
 
     match subcommand.as_str() {
-        "serve" | "mcp" => {
-            // Load config (file + env merge)
+        #[cfg(feature = "web")]
+        "serve" => {
             let config = Config::load()?;
-            match subcommand.as_str() {
-                "serve" => cmd_serve(config).await?,
-                "mcp" => cmd_mcp(config).await?,
-                _ => unreachable!(),
-            }
+            cmd_serve(config).await?;
+        }
+        #[cfg(feature = "mcp")]
+        "mcp" => {
+            let config = Config::load()?;
+            cmd_mcp(config).await?;
+        }
+        #[cfg(feature = "tui")]
+        "tui" => {
+            let config = Config::load()?;
+            cmd_default(config).await?;
         }
         "setup" => {
             wizard::run_wizard_preseed(true)?;
@@ -53,23 +66,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        "auto" => {
-            // First-run: no subcommand given. Check if config file exists.
-            // If not → run wizard; otherwise → serve.
+        "auto" | "" => {
+            // No subcommand: default frontend is the TUI when it is compiled in,
+            // otherwise the web dashboard.
             let cp = config_path();
             if cp.exists() {
                 let config = Config::load()?;
-                cmd_serve(config).await?;
+                cmd_default(config).await?;
             } else {
-                // Check if env vars provide enough
                 match Config::load() {
                     Ok(config) => {
-                        // Env vars work — serve
                         println!(
                             "[memayu] using env vars (no config file at {})",
                             cp.display()
                         );
-                        cmd_serve(config).await?;
+                        cmd_default(config).await?;
                     }
                     Err(e) => {
                         eprintln!(
@@ -82,19 +93,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!();
                         wizard::run_wizard()?;
                         println!();
-                        println!(
-                            "{}",
-                            console::style("Starting server with new config…").cyan()
-                        );
+                        println!("{}", console::style("Starting with new config…").cyan());
                         let config = Config::load()?;
-                        cmd_serve(config).await?;
+                        cmd_default(config).await?;
                     }
                 }
             }
         }
         other => {
             eprintln!("unknown subcommand: {other}");
-            eprintln!("usage: memayu [serve|mcp|setup|config]");
+            eprintln!("{}", usage());
             std::process::exit(1);
         }
     }
@@ -102,8 +110,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ── serve ──
+fn usage() -> String {
+    let mut subcommands: Vec<&str> = Vec::new();
+    subcommands.push("setup");
+    subcommands.push("config");
+    #[cfg(feature = "tui")]
+    subcommands.push("tui");
+    #[cfg(feature = "web")]
+    subcommands.push("serve");
+    #[cfg(feature = "mcp")]
+    subcommands.push("mcp");
+    format!("usage: memayu [{}]", subcommands.join("|"))
+}
 
+/// Default frontend: TUI when available, otherwise the web dashboard.
+async fn cmd_default(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "tui")]
+    {
+        tui::run(config).await
+    }
+    #[cfg(all(not(feature = "tui"), feature = "web"))]
+    {
+        cmd_serve(config).await
+    }
+    #[cfg(all(not(feature = "tui"), not(feature = "web")))]
+    {
+        let _ = config;
+        eprintln!("error: this build has no TUI or web frontend enabled");
+        eprintln!("hint: rebuild with --features tui,web");
+        std::process::exit(1)
+    }
+}
+
+// ── web dashboard ──
+
+#[cfg(feature = "web")]
 async fn cmd_serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     if config.api_url.is_some() {
         eprintln!(
@@ -112,7 +153,7 @@ async fn cmd_serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let service = build_service(&config).await?;
+    let service = build_web_service(&config).await?;
 
     let api_db = memayu_api::open_db(&config.storage).await?;
     let registry =
@@ -130,9 +171,12 @@ async fn cmd_serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ── mcp ──
+// ── MCP stdio ──
 
+#[cfg(feature = "mcp")]
 async fn cmd_mcp(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    use memayu_mcp::{Backend, MemoryBackend};
+
     let backend: Arc<dyn MemoryBackend> = if let Some(api_url) = config.api_url {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -145,7 +189,7 @@ async fn cmd_mcp(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             client,
         })
     } else {
-        let service = build_service(&config).await?;
+        let (service, _) = service::build_service(&config).await?;
         Arc::new(Backend::Local(service))
     };
 
@@ -153,9 +197,16 @@ async fn cmd_mcp(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ── shared build ──
+// ── shared service builders ──
 
-async fn build_service(config: &Config) -> Result<Arc<MemoryService>, Box<dyn std::error::Error>> {
+/// Build the dashboard service via the API registry, which powers runtime
+/// provider reconfiguration in the web UI.
+#[cfg(feature = "web")]
+async fn build_web_service(
+    config: &Config,
+) -> Result<Arc<MemoryService>, Box<dyn std::error::Error>> {
+    use memayu_core::{EmbedderProvider, StorageProvider};
+
     let api_db = memayu_api::open_db(&config.storage).await?;
     let registry =
         memayu_api::load_registry(&api_db, config.llm.clone(), config.embedder.clone()).await?;
