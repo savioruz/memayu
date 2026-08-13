@@ -72,6 +72,14 @@ pub fn run_wizard() -> Result<String, Box<dyn std::error::Error>> {
     let sim_str = prompt("Similarity threshold (0.0-1.0)", "0.65");
     let similarity_threshold: f32 = sim_str.parse().unwrap_or(0.65);
 
+    let modes = vec!["llm", "raw"];
+    let mode_idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Extraction mode")
+        .items(&modes)
+        .default(0)
+        .interact()?;
+    let extraction_mode = modes[mode_idx].to_string();
+
     // ── Build ConfigFile and serialize ──
     let cf = ConfigFile {
         storage: Some(memayu_config::StorageConfigFile {
@@ -111,6 +119,7 @@ pub fn run_wizard() -> Result<String, Box<dyn std::error::Error>> {
         }),
         behavior: Some(memayu_config::BehaviorConfigFile {
             similarity_threshold: Some(similarity_threshold),
+            extraction_mode: Some(extraction_mode),
         }),
     };
 
@@ -295,6 +304,23 @@ pub fn run_wizard_preseed(skip_intro: bool) -> Result<String, Box<dyn std::error
     let sim_str = prompt("Similarity threshold (0.0-1.0)", &prev_sim);
     let similarity_threshold: f32 = sim_str.parse().unwrap_or(0.65);
 
+    let current_mode = existing
+        .as_ref()
+        .and_then(|e| e.behavior.as_ref())
+        .and_then(|b| b.extraction_mode.clone())
+        .unwrap_or_else(|| "llm".into());
+    let modes = vec!["llm", "raw"];
+    let mode_default_idx = match current_mode.as_str() {
+        "raw" => 1,
+        _ => 0,
+    };
+    let mode_idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Extraction mode")
+        .items(&modes)
+        .default(mode_default_idx)
+        .interact()?;
+    let extraction_mode = modes[mode_idx].to_string();
+
     // ── Build ConfigFile and serialize ──
     let cf = ConfigFile {
         storage: Some(memayu_config::StorageConfigFile {
@@ -334,6 +360,7 @@ pub fn run_wizard_preseed(skip_intro: bool) -> Result<String, Box<dyn std::error
         }),
         behavior: Some(memayu_config::BehaviorConfigFile {
             similarity_threshold: Some(similarity_threshold),
+            extraction_mode: Some(extraction_mode),
         }),
     };
 

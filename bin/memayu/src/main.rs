@@ -240,9 +240,8 @@ async fn build_web_service(
     };
 
     let llm = memayu_api::LlmConfigProvider::new(registry.clone());
-    Ok(Arc::new(MemoryService::new(
-        storage,
-        Arc::new(embedder),
-        Arc::new(llm),
-    )))
+    Ok(Arc::new(
+        MemoryService::new(storage, Arc::new(embedder), Arc::new(llm))
+            .with_extraction_mode(config.extraction_mode),
+    ))
 }

@@ -1,16 +1,31 @@
 use crate::extraction;
 use crate::{
-    CoreError, EmbedderProvider, ExtractionDecision, ExtractionResult, LlmProvider, Memory,
-    Message, Metadata, StorageError, StorageProvider,
+    CoreError, EmbedderProvider, ExtractionDecision, ExtractionMode, ExtractionResult, LlmProvider,
+    Memory, Message, Metadata, StorageError, StorageProvider,
 };
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Similarity threshold used by [`ExtractionMode::Raw`] to treat a new memory
+/// as a duplicate of an existing one. Above this value, ingestion is a NOOP.
+pub const RAW_DEDUPE_THRESHOLD: f32 = 0.98;
+
 pub struct MemoryService {
     storage: Arc<dyn StorageProvider>,
     embedder: Arc<dyn EmbedderProvider>,
     llm: Arc<dyn LlmProvider>,
+    extraction_mode: ExtractionMode,
+}
+
+/// Result of an ingestion with a callable distinction between a real store and
+/// a raw-mode near-duplicate skip. LLM mode always yields [`Stored`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddMemoryOutcome {
+    /// A new memory was stored, or an existing one was updated.
+    Stored { memory_id: String },
+    /// Raw mode skipped storage because an existing memory was near-identical.
+    Noop { memory_id: String },
 }
 
 impl MemoryService {
@@ -23,7 +38,18 @@ impl MemoryService {
             storage,
             embedder,
             llm,
+            extraction_mode: ExtractionMode::default(),
         }
+    }
+
+    /// Select the extraction strategy. The default is [`ExtractionMode::Llm`].
+    pub fn with_extraction_mode(mut self, mode: ExtractionMode) -> Self {
+        self.extraction_mode = mode;
+        self
+    }
+
+    pub fn extraction_mode(&self) -> ExtractionMode {
+        self.extraction_mode
     }
 
     #[deprecated(note = "similarity_threshold is no longer used; use new()")]
@@ -37,10 +63,23 @@ impl MemoryService {
             storage,
             embedder,
             llm,
+            extraction_mode: ExtractionMode::default(),
         }
     }
 
     pub async fn add_memory(
+        &self,
+        user_id: &str,
+        content: &str,
+        metadata: &Metadata,
+    ) -> Result<Memory, CoreError> {
+        match self.extraction_mode {
+            ExtractionMode::Raw => self.add_memory_raw(user_id, content, metadata).await,
+            ExtractionMode::Llm => self.add_memory_llm(user_id, content, metadata).await,
+        }
+    }
+
+    async fn add_memory_llm(
         &self,
         user_id: &str,
         content: &str,
@@ -100,6 +139,85 @@ impl MemoryService {
 
         self.storage.save_memory(&memory).await?;
         Ok(memory)
+    }
+
+    async fn add_memory_raw(
+        &self,
+        user_id: &str,
+        content: &str,
+        metadata: &Metadata,
+    ) -> Result<Memory, CoreError> {
+        Ok(self.ingest_raw(user_id, content, metadata).await?.0)
+    }
+
+    /// Embed, dedupe, and store in raw mode. Returns the memory and whether it
+    /// was newly stored (`false` means an existing near-duplicate was reused).
+    async fn ingest_raw(
+        &self,
+        user_id: &str,
+        content: &str,
+        metadata: &Metadata,
+    ) -> Result<(Memory, bool), CoreError> {
+        let vector = self.embedder.embed(content).await?;
+
+        const SEARCH_LIMIT: usize = 5;
+        let candidates = self
+            .storage
+            .search_memory(user_id, &vector, SEARCH_LIMIT)
+            .await?;
+
+        // Near-duplicate detection: skip storage when an existing memory is
+        // effectively identical, but still report success to the caller.
+        if let Some((existing, _)) = candidates
+            .iter()
+            .find(|(_, score)| *score > RAW_DEDUPE_THRESHOLD)
+        {
+            return Ok((existing.clone(), false));
+        }
+
+        let now = Utc::now();
+        let memory = Memory {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            content: content.to_string(),
+            vector,
+            metadata: metadata.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.storage.save_memory(&memory).await?;
+        Ok((memory, true))
+    }
+
+    /// Ingest and report whether storage happened. Raw mode returns
+    /// [`AddMemoryOutcome::Noop`] for near-duplicates; LLM mode always stores.
+    pub async fn add_memory_with_outcome(
+        &self,
+        user_id: &str,
+        content: &str,
+        metadata: &Metadata,
+    ) -> Result<AddMemoryOutcome, CoreError> {
+        match self.extraction_mode {
+            ExtractionMode::Raw => {
+                let (memory, stored) = self.ingest_raw(user_id, content, metadata).await?;
+                Ok(if stored {
+                    AddMemoryOutcome::Stored {
+                        memory_id: memory.id,
+                    }
+                } else {
+                    AddMemoryOutcome::Noop {
+                        memory_id: memory.id,
+                    }
+                })
+            }
+            ExtractionMode::Llm => {
+                let memory = self.add_memory_llm(user_id, content, metadata).await?;
+                Ok(AddMemoryOutcome::Stored {
+                    memory_id: memory.id,
+                })
+            }
+        }
     }
 
     pub async fn search_memory(
@@ -619,5 +737,91 @@ mod tests {
             llm.last_prompt().contains("EXISTING MEMORIES: none"),
             "prompt must reflect the empty candidate set"
         );
+    }
+
+    // ── issue #28: raw extraction mode ──
+
+    fn raw_service_with(storage: MockStorage) -> MemoryService {
+        MemoryService::new(
+            Arc::new(storage),
+            Arc::new(MockEmbedder),
+            Arc::new(MockLlm::scripted(vec![])),
+        )
+        .with_extraction_mode(ExtractionMode::Raw)
+    }
+
+    #[test]
+    fn default_extraction_mode_is_llm() {
+        let svc = service_with(
+            MockStorage {
+                rows: Mutex::new(vec![]),
+                score: 0.0,
+            },
+            MockLlm::scripted(vec![]),
+        );
+        assert_eq!(svc.extraction_mode(), ExtractionMode::Llm);
+    }
+
+    #[tokio::test]
+    async fn raw_mode_stores_content_verbatim_without_llm() {
+        let storage = MockStorage {
+            rows: Mutex::new(vec![]),
+            score: 0.0,
+        };
+        let llm = Arc::new(MockLlm::scripted(vec![]));
+        let llm_provider: Arc<dyn LlmProvider> = llm.clone();
+        let svc = MemoryService::new(Arc::new(storage), Arc::new(MockEmbedder), llm_provider)
+            .with_extraction_mode(ExtractionMode::Raw);
+
+        let result = svc
+            .add_memory("u1", "User lives in Jakarta", &HashMap::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.content, "User lives in Jakarta", "verbatim storage");
+        assert_eq!(svc.list_memories("u1", 10).await.unwrap().len(), 1);
+        assert!(
+            llm.last_prompt().is_empty(),
+            "raw mode must never invoke the LLM"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_mode_skips_near_duplicate() {
+        let storage = MockStorage {
+            rows: Mutex::new(vec![mem("m1", "u1", "User lives in Jakarta")]),
+            score: 0.99,
+        };
+        let svc = raw_service_with(storage);
+
+        let outcome = svc
+            .add_memory_with_outcome("u1", "User lives in Jakarta", &HashMap::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            AddMemoryOutcome::Noop {
+                memory_id: "m1".to_string()
+            }
+        );
+        assert_eq!(svc.list_memories("u1", 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn raw_mode_stores_when_below_threshold() {
+        let storage = MockStorage {
+            rows: Mutex::new(vec![mem("m1", "u1", "User lives in Jakarta")]),
+            score: 0.97,
+        };
+        let svc = raw_service_with(storage);
+
+        let result = svc
+            .add_memory("u1", "User prefers coffee", &HashMap::new())
+            .await
+            .unwrap();
+
+        assert_ne!(result.id, "m1");
+        assert_eq!(svc.list_memories("u1", 10).await.unwrap().len(), 2);
     }
 }

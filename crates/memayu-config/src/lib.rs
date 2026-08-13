@@ -5,6 +5,8 @@ pub use error::ConfigError;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub use memayu_core::ExtractionMode;
+
 // ── Types ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -133,6 +135,8 @@ pub struct ServerConfigFile {
 pub struct BehaviorConfigFile {
     #[serde(default)]
     pub similarity_threshold: Option<f32>,
+    #[serde(default)]
+    pub extraction_mode: Option<String>,
 }
 
 // ── Runtime Config ──
@@ -144,6 +148,7 @@ pub struct Config {
     pub embedder: ProviderConfig,
     pub server: ServerConfig,
     pub similarity_threshold: f32,
+    pub extraction_mode: ExtractionMode,
     pub dimension: Option<usize>,
     /// Cloud-mode: API endpoint (MEMAYU_API_URL). When set, LLM/embedder/storage validation is skipped.
     pub api_url: Option<String>,
@@ -221,6 +226,14 @@ impl Config {
 
         let file = cf.unwrap_or_default();
 
+        // ── behavior (resolved first: raw mode makes the LLM optional) ──
+        let extraction_mode = extraction_mode(
+            env,
+            file.behavior
+                .as_ref()
+                .and_then(|b| b.extraction_mode.as_deref()),
+        )?;
+
         // ── storage ──
         let backend: StorageBackend = env
             .get("MEMAYU_STORAGE_BACKEND")
@@ -250,23 +263,48 @@ impl Config {
         };
 
         // ── LLM ──
-        let llm_base_url = env_required_or(
-            env,
-            file.llm.as_ref().and_then(|l| l.base_url.as_deref()),
-            "MEMAYU_LLM_BASE_URL",
-            "llm.base_url",
-        )?;
-        let llm_api_key = env_opt_or(
-            env,
-            file.llm.as_ref().and_then(|l| l.api_key.as_deref()),
-            "MEMAYU_LLM_API_KEY",
-        );
-        let llm_model = env_required_or(
-            env,
-            file.llm.as_ref().and_then(|l| l.model.as_deref()),
-            "MEMAYU_LLM_MODEL",
-            "llm.model",
-        )?;
+        // Required in `llm` mode; optional in `raw` mode, which never calls it.
+        let (llm_base_url, llm_api_key, llm_model) = if extraction_mode == ExtractionMode::Raw {
+            (
+                env_opt_or(
+                    env,
+                    file.llm.as_ref().and_then(|l| l.base_url.as_deref()),
+                    "MEMAYU_LLM_BASE_URL",
+                )
+                .unwrap_or_default(),
+                env_opt_or(
+                    env,
+                    file.llm.as_ref().and_then(|l| l.api_key.as_deref()),
+                    "MEMAYU_LLM_API_KEY",
+                ),
+                env_opt_or(
+                    env,
+                    file.llm.as_ref().and_then(|l| l.model.as_deref()),
+                    "MEMAYU_LLM_MODEL",
+                )
+                .unwrap_or_default(),
+            )
+        } else {
+            (
+                env_required_or(
+                    env,
+                    file.llm.as_ref().and_then(|l| l.base_url.as_deref()),
+                    "MEMAYU_LLM_BASE_URL",
+                    "llm.base_url",
+                )?,
+                env_opt_or(
+                    env,
+                    file.llm.as_ref().and_then(|l| l.api_key.as_deref()),
+                    "MEMAYU_LLM_API_KEY",
+                ),
+                env_required_or(
+                    env,
+                    file.llm.as_ref().and_then(|l| l.model.as_deref()),
+                    "MEMAYU_LLM_MODEL",
+                    "llm.model",
+                )?,
+            )
+        };
 
         // ── Embedder ──
         let emb_base_url = env_required_or(
@@ -341,7 +379,11 @@ impl Config {
                 database_url: postgres_url,
             },
             llm: ProviderConfig {
-                base_url: validate_url("MEMAYU_LLM_BASE_URL", llm_base_url)?,
+                base_url: if llm_base_url.is_empty() {
+                    llm_base_url
+                } else {
+                    validate_url("MEMAYU_LLM_BASE_URL", llm_base_url)?
+                },
                 api_key: llm_api_key,
                 model: llm_model,
             },
@@ -352,6 +394,7 @@ impl Config {
             },
             server: ServerConfig { bind_addr, port },
             similarity_threshold: sim,
+            extraction_mode,
             dimension: dim,
             api_url: None,
             api_key: None,
@@ -365,11 +408,13 @@ impl Config {
         if self.api_url.is_some() {
             return msgs; // cloud mode skips validation
         }
-        if self.llm.base_url.is_empty() {
-            msgs.push("llm.base_url: missing — set MEMAYU_LLM_BASE_URL".into());
-        }
-        if self.llm.model.is_empty() {
-            msgs.push("llm.model: missing — set MEMAYU_LLM_MODEL".into());
+        if self.extraction_mode != ExtractionMode::Raw {
+            if self.llm.base_url.is_empty() {
+                msgs.push("llm.base_url: missing — set MEMAYU_LLM_BASE_URL".into());
+            }
+            if self.llm.model.is_empty() {
+                msgs.push("llm.model: missing — set MEMAYU_LLM_MODEL".into());
+            }
         }
         if self.embedder.base_url.is_empty() {
             msgs.push("embedder.base_url: missing — set MEMAYU_EMBEDDER_BASE_URL".into());
@@ -423,6 +468,7 @@ impl Config {
              \n\
              [behavior]\n\
              similarity_threshold = {}\n\
+             extraction_mode = \"{}\"\n\
              \n\
              {}{}\n",
             self.storage.backend,
@@ -437,6 +483,7 @@ impl Config {
             self.server.bind_addr,
             self.server.port,
             self.similarity_threshold,
+            self.extraction_mode,
             if let Some(d) = self.dimension {
                 format!("embedding_dim = {d}\n")
             } else {
@@ -493,6 +540,7 @@ fn cloud_config(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
             port: 8080,
         },
         similarity_threshold: sim,
+        extraction_mode: ExtractionMode::default(),
         dimension: None,
         api_url: env.get("MEMAYU_API_URL").cloned(),
         api_key: env.get("MEMAYU_API_KEY").cloned(),
@@ -533,6 +581,29 @@ fn env_opt_or(
         }
     }
     None
+}
+
+/// Resolve the extraction mode from env (`MEMAYU_EXTRACTION_MODE`) or the
+/// config file (`behavior.extraction_mode`). Defaults to [`ExtractionMode::Llm`].
+fn extraction_mode(
+    env: &HashMap<String, String>,
+    file_val: Option<&str>,
+) -> Result<ExtractionMode, ConfigError> {
+    if let Some(v) = env.get("MEMAYU_EXTRACTION_MODE").filter(|s| !s.is_empty()) {
+        return v.parse().map_err(|e| ConfigError::Invalid {
+            var: "MEMAYU_EXTRACTION_MODE",
+            value: v.clone(),
+            detail: e,
+        });
+    }
+    if let Some(v) = file_val.filter(|s| !s.is_empty()) {
+        return v.parse().map_err(|e| ConfigError::Invalid {
+            var: "MEMAYU_EXTRACTION_MODE",
+            value: v.to_string(),
+            detail: e,
+        });
+    }
+    Ok(ExtractionMode::default())
 }
 
 #[cfg(test)]
@@ -751,6 +822,7 @@ mod tests {
                 port: 18080,
             },
             similarity_threshold: 0.65,
+            extraction_mode: ExtractionMode::Llm,
             dimension: None,
             api_url: None,
             api_key: None,
@@ -782,5 +854,109 @@ mod tests {
         std::env::set_var("MEMAYU_CONFIG", "/tmp/test-config.toml");
         assert_eq!(config_path(), PathBuf::from("/tmp/test-config.toml"));
         std::env::remove_var("MEMAYU_CONFIG");
+    }
+
+    // ── extraction_mode ──
+
+    #[test]
+    fn extraction_mode_defaults_to_llm() {
+        let cfg = Config::from_env(&minimal_env()).unwrap();
+        assert_eq!(cfg.extraction_mode, ExtractionMode::Llm);
+    }
+
+    #[test]
+    fn extraction_mode_env_raw() {
+        let mut env = minimal_env();
+        env.insert("MEMAYU_EXTRACTION_MODE".into(), "raw".into());
+        let cfg = Config::from_env(&env).unwrap();
+        assert_eq!(cfg.extraction_mode, ExtractionMode::Raw);
+    }
+
+    #[test]
+    fn raw_mode_does_not_require_llm_config() {
+        // Only embedder is configured: raw mode must accept a fully absent LLM.
+        let env = env_with(&[
+            ("MEMAYU_EXTRACTION_MODE", "raw"),
+            ("MEMAYU_EMBEDDER_BASE_URL", "https://api.openai.com/v1"),
+            ("MEMAYU_EMBEDDER_API_KEY", "emb-key"),
+            ("MEMAYU_EMBEDDER_MODEL", "text-embedding-3-small"),
+        ]);
+        let cfg = Config::from_env(&env).unwrap();
+        assert_eq!(cfg.extraction_mode, ExtractionMode::Raw);
+        assert!(cfg.llm.base_url.is_empty());
+        assert!(cfg.llm.model.is_empty());
+        assert!(cfg.check().is_empty(), "raw mode must validate cleanly");
+    }
+
+    #[test]
+    fn llm_mode_still_requires_llm_config() {
+        let env = env_with(&[
+            ("MEMAYU_EMBEDDER_BASE_URL", "https://api.openai.com/v1"),
+            ("MEMAYU_EMBEDDER_MODEL", "text-embedding-3-small"),
+        ]);
+        let err = Config::from_env(&env).unwrap_err();
+        assert!(matches!(err, ConfigError::MissingField { .. }));
+    }
+
+    #[test]
+    fn extraction_mode_env_llm_explicit() {
+        let mut env = minimal_env();
+        env.insert("MEMAYU_EXTRACTION_MODE".into(), "llm".into());
+        let cfg = Config::from_env(&env).unwrap();
+        assert_eq!(cfg.extraction_mode, ExtractionMode::Llm);
+    }
+
+    #[test]
+    fn extraction_mode_invalid_rejected() {
+        let mut env = minimal_env();
+        env.insert("MEMAYU_EXTRACTION_MODE".into(), "hybrid".into());
+        let err = Config::from_env(&env).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { .. }));
+    }
+
+    #[test]
+    fn extraction_mode_from_toml() {
+        let toml = indoc::indoc! {r#"
+            [llm]
+            base_url = "https://llm.example.com/v1"
+            model = "gpt-4"
+
+            [embedder]
+            base_url = "https://emb.example.com/v1"
+            model = "text-embedding-3-large"
+
+            [behavior]
+            extraction_mode = "raw"
+        "#};
+        let cf: ConfigFile = toml::from_str(toml).unwrap();
+        let cfg = Config::merge(Some(cf), &HashMap::new()).unwrap();
+        assert_eq!(cfg.extraction_mode, ExtractionMode::Raw);
+    }
+
+    #[test]
+    fn env_extraction_mode_overrides_toml() {
+        let toml = indoc::indoc! {r#"
+            [llm]
+            base_url = "https://llm.example.com/v1"
+            model = "gpt-4"
+
+            [embedder]
+            base_url = "https://emb.example.com/v1"
+            model = "text-embedding-3-large"
+
+            [behavior]
+            extraction_mode = "raw"
+        "#};
+        let cf: ConfigFile = toml::from_str(toml).unwrap();
+        let env = env_with(&[("MEMAYU_EXTRACTION_MODE", "llm")]);
+        let cfg = Config::merge(Some(cf), &env).unwrap();
+        assert_eq!(cfg.extraction_mode, ExtractionMode::Llm);
+    }
+
+    #[test]
+    fn show_includes_extraction_mode() {
+        let cfg = Config::from_env(&minimal_env()).unwrap();
+        let out = cfg.show();
+        assert!(out.contains("extraction_mode = \"llm\""));
     }
 }

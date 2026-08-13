@@ -1671,6 +1671,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "indoc",
+ "memayu-core",
  "serde",
  "thiserror 2.0.20",
  "toml",

@@ -28,6 +28,18 @@ pub async fn get_home(
         "Home",
         "Home",
         maud::html! {
+            div class="mb-4" {
+                @let mode = service.extraction_mode();
+                @if mode.to_string() == "raw" {
+                    span class="badge badge-warning badge-sm gap-1" {
+                        "Mode: Raw — automatic conflict detection disabled"
+                    }
+                } @else {
+                    span class="badge badge-outline badge-sm" {
+                        (format!("Mode: {}", mode))
+                    }
+                }
+            }
             // Search bar
             form method="post" action="/home/search" class="mb-6" {
                 div class="join w-full" {

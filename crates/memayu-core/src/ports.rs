@@ -96,6 +96,43 @@ pub enum ExtractionDecision {
     Update,
 }
 
+/// Per-instance memory-ingestion strategy.
+///
+/// - [`ExtractionMode::Llm`] is the default: the LLM normalizes content and
+///   decides ADD vs UPDATE (unchanged legacy behavior).
+/// - [`ExtractionMode::Raw`] stores content verbatim and skips the LLM
+///   entirely, using a high similarity threshold to skip exact duplicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionMode {
+    #[default]
+    Llm,
+    Raw,
+}
+
+impl std::fmt::Display for ExtractionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Llm => write!(f, "llm"),
+            Self::Raw => write!(f, "raw"),
+        }
+    }
+}
+
+impl std::str::FromStr for ExtractionMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "llm" => Ok(Self::Llm),
+            "raw" => Ok(Self::Raw),
+            other => Err(format!(
+                "unknown extraction mode \"{other}\"; expected \"llm\" or \"raw\""
+            )),
+        }
+    }
+}
+
 impl ExtractionResult {
     pub fn add(content: impl Into<String>) -> Self {
         Self {

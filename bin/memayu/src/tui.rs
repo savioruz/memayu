@@ -181,8 +181,8 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new(service);
     app.status = format!(
-        "embedder dimension = {dimension} ({})",
-        config.embedder.model
+        "embedder dimension = {dimension} ({}) | extraction mode = {}",
+        config.embedder.model, config.extraction_mode
     );
     app.load().await;
 

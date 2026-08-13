@@ -54,10 +54,13 @@ pub async fn build_service(
 ) -> Result<(Arc<MemoryService>, usize), Box<dyn std::error::Error>> {
     let dimension = detect_dimension(config).await?;
     let storage = build_storage(config, dimension).await?;
-    let service = Arc::new(MemoryService::new(
-        storage,
-        Arc::new(HttpEmbedderProvider::new(config.embedder.clone())),
-        Arc::new(HttpLlmProvider::new(config.llm.clone())),
-    ));
+    let service = Arc::new(
+        MemoryService::new(
+            storage,
+            Arc::new(HttpEmbedderProvider::new(config.embedder.clone())),
+            Arc::new(HttpLlmProvider::new(config.llm.clone())),
+        )
+        .with_extraction_mode(config.extraction_mode),
+    );
     Ok((service, dimension))
 }
