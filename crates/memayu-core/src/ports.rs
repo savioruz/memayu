@@ -36,6 +36,16 @@ pub trait StorageProvider: Send + Sync {
         vector: &[f32],
         limit: usize,
     ) -> Result<Vec<(Memory, f32)>, StorageError>;
+    /// Full-text search over memory content, ranked natively (higher = better).
+    ///
+    /// This is the second signal for hybrid search. Backends are free to pick
+    /// their engine (FTS5, tsvector) as long as scores sort descending.
+    async fn search_fulltext(
+        &self,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(Memory, f32)>, StorageError>;
     async fn list_memories(&self, user_id: &str, limit: usize)
         -> Result<Vec<Memory>, StorageError>;
     async fn delete_memory(&self, memory_id: &str) -> Result<(), StorageError>;

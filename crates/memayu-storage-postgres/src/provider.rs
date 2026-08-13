@@ -161,6 +161,37 @@ impl StorageProvider for PostgresProvider {
         Ok(out)
     }
 
+    async fn search_fulltext(
+        &self,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(Memory, f32)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, content, embedding, metadata, created_at, updated_at,
+                    ts_rank(content_tsv, websearch_to_tsquery('english', $1)) AS score
+             FROM memories WHERE user_id = $2 AND content_tsv @@ websearch_to_tsquery('english', $1)
+             ORDER BY score DESC
+             LIMIT $3",
+        )
+        .bind(query)
+        .bind(user_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Other(format!("full-text search: {e}")))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let score: f64 = row
+                .try_get("score")
+                .map_err(|e| StorageError::Other(format!("read full-text score: {e}")))?;
+            let mem = memory_from_row(&row)?;
+            out.push((mem, score as f32));
+        }
+        Ok(out)
+    }
+
     async fn list_memories(
         &self,
         user_id: &str,
