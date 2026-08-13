@@ -29,6 +29,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = Config::load()?;
             cmd_mcp(config).await?;
         }
+        #[cfg(feature = "tui")]
+        "tui" => {
+            let config = Config::load()?;
+            cmd_default(config).await?;
+        }
         "setup" => {
             wizard::run_wizard_preseed(true)?;
         }

@@ -1,4 +1,4 @@
-.PHONY: all help build test test-integration lint fmt fmt-check check release clean setup dev dev-web
+.PHONY: all help build test test-integration lint fmt fmt-check audit check release clean setup dev dev-web
 
 all: check
 
@@ -38,6 +38,9 @@ fmt: ## Format code and verify formatting
 
 fmt-check: ## Check formatting
 	cargo fmt --all -- --check
+
+audit: ## Scan dependencies for known vulnerabilities
+	cargo audit
 
 ##@ Development
 

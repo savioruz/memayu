@@ -1,0 +1,20 @@
+# RustSec cargo-audit configuration.
+# https://rustsec.org/advisories/
+#
+# Advisories listed here have no fixed release available on a stable,
+# non-pre-release dependency line, or are not reachable in the compiled
+# dependency graph. Revisit these on every dependency update.
+
+[advisories]
+ignore = [
+  # rsa 0.9.10 (Marvin Attack) has no fixed release upstream. It is an
+  # inactive optional dependency: sqlx-macros-core statically depends on
+  # sqlx-mysql (which depends on rsa) for offline type-checking, and Cargo
+  # keeps it in Cargo.lock even though the `mysql` feature is never enabled.
+  # cargo-audit scans the whole lockfile, so it is reported even though it is
+  # not compiled (`cargo tree -i rsa` is empty).
+  "RUSTSEC-2023-0071",
+  # paste 1.0.15 is unmaintained. Build-time dependency of utoipa-axum 0.2.0
+  # (the latest release), so there is no upstream upgrade path yet.
+  "RUSTSEC-2024-0436",
+]

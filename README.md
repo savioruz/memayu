@@ -29,6 +29,14 @@ Or grab a binary directly from the [releases page](https://github.com/savioruz/m
 
 ```bash
 cargo build --release
+./target/release/memayu
+```
+
+This starts the Ratatui terminal UI (the default frontend). To run the web
+dashboard instead, build with all features and use the `serve` subcommand:
+
+```bash
+cargo build --release --all-features
 ./target/release/memayu serve
 ```
 
