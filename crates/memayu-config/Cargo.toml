@@ -9,6 +9,7 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 dirs = "6"
 toml = "0.8"
+memayu-core = { path = "../memayu-core" }
 
 [dev-dependencies]
 indoc = "2"
