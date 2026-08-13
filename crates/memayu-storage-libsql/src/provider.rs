@@ -408,4 +408,59 @@ mod tests {
             "m1"
         );
     }
+
+    #[tokio::test]
+    async fn backfills_fts_for_preexisting_memories() {
+        // Simulate an existing self-hosted database created before the FTS5
+        // table existed: write the old `memories` schema plus one row, then
+        // reopen through LibsqlProvider. The upgrade path must backfill the
+        // row so the full-text leg can find it without a re-save.
+        let path = std::env::temp_dir().join(format!(
+            "memayu-fts-backfill-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let path_str = path.to_string_lossy().to_string();
+
+        {
+            let db = libsql::Builder::new_local(&path_str).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute(
+                "CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding FLOAT32(3) NOT NULL,
+                    metadata TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memories
+                    (id, user_id, content, embedding, metadata, created_at, updated_at)
+                 VALUES
+                    ('legacy1', 'u1', 'legacy jakarta note', X'0000803F0000000000000000',
+                     '{}', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+                (),
+            )
+            .await
+            .unwrap();
+        } // drop the old-schema database and close the file
+
+        let provider = LibsqlProvider::open(&path_str, 3).await.unwrap();
+        let results = provider.search_fulltext("u1", "jakarta", 5).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "pre-upgrade row must be backfilled into the FTS index"
+        );
+        assert_eq!(results[0].0.id, "legacy1");
+
+        drop(provider);
+        let _ = std::fs::remove_file(&path);
+    }
 }
