@@ -21,7 +21,6 @@ libsql = { version = "0.9", default-features = false, features = ["core"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros"] }
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 utoipa-axum = "0.2"
-utoipa-scalar = { version = "0.3", features = ["axum"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["sync"] }
 

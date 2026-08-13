@@ -239,7 +239,7 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     headers.insert(
         axum::http::header::HeaderName::from_static("content-security-policy"),
         axum::http::HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' https://fonts.scalar.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         ),
     );
     if behind_tls() {
