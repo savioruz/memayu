@@ -136,6 +136,7 @@ pub async fn get_login(
 
 pub async fn post_login(
     State(services): State<WebServices>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, (StatusCode, String)> {
     let req = LoginRequest {
@@ -145,16 +146,32 @@ pub async fn post_login(
 
     match services.auth_login(&req).await {
         Ok((_auth_response, token)) => {
-            let mut resp = Redirect::to("/home").into_response();
-            resp.headers_mut().insert(
-                SET_COOKIE,
-                format!(
-                    "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}",
-                )
-                .parse()
-                .unwrap(),
+            let is_htmx = headers
+                .get("hx-request")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+
+            let cookie = format!(
+                "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}",
             );
-            Ok(resp)
+
+            if is_htmx {
+                // htmx would follow a 303 and swap the whole /home document into the login
+                // card. Return an empty response with HX-Redirect so htmx navigates instead.
+                let mut resp = StatusCode::NO_CONTENT.into_response();
+                resp.headers_mut()
+                    .insert(SET_COOKIE, cookie.parse().unwrap());
+                resp.headers_mut().insert(
+                    axum::http::header::HeaderName::from_static("hx-redirect"),
+                    axum::http::HeaderValue::from_static("/home"),
+                );
+                Ok(resp)
+            } else {
+                let mut resp = Redirect::to("/home").into_response();
+                resp.headers_mut()
+                    .insert(SET_COOKIE, cookie.parse().unwrap());
+                Ok(resp)
+            }
         }
         Err(e) => {
             if e.status == 401 {

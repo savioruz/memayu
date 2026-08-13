@@ -158,6 +158,47 @@ async fn login_rejects_bad_password() {
 }
 
 #[tokio::test]
+async fn login_via_htmx_returns_hx_redirect() {
+    let app = build_test_app().await;
+
+    // Create the user first.
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/setup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "email=admin@memayu.test&password=Secret12&confirm=Secret12",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Successful htmx login should not return a redirect body that htmx swaps into the card.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("hx-request", "true")
+                .body(Body::from("email=admin@memayu.test&password=Secret12"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.headers().get("hx-redirect").unwrap().to_str().unwrap(),
+        "/home"
+    );
+    assert!(resp.headers().get("set-cookie").is_some());
+}
+
+#[tokio::test]
 async fn generate_api_key_shown_once() {
     let app = build_test_app().await;
 

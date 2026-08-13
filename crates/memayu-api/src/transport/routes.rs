@@ -2,12 +2,12 @@
 /// into a single Axum Router.
 use crate::transport::handlers;
 use crate::transport::middleware::{self, ApiState};
+use axum::response::Html;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
-use utoipa_scalar::Servable;
 
 /// The Memayu memory API
 #[derive(OpenApi)]
@@ -39,6 +39,27 @@ use utoipa_scalar::Servable;
 )]
 pub struct ApiDoc;
 
+/// Render a self-hosted Scalar API reference page. The spec is embedded inline as JSON and the
+/// Scalar bundle is loaded from the local static assets served by the web crate, keeping the page
+/// compatible with the `script-src 'self'` CSP policy.
+fn render_scalar_page(spec: &utoipa::openapi::OpenApi) -> String {
+    let spec_json = spec.to_pretty_json().unwrap_or_default();
+    format!(
+        r#"<!doctype html>
+<html>
+<head>
+    <title>Memayu API Reference</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+</head>
+<body>
+<script id="api-reference" type="application/json">{spec_json}</script>
+<script src="/static/scalar.min.js"></script>
+</body>
+</html>"#
+    )
+}
+
 /// Build the full API router including auth, API keys, and memory endpoints.
 /// All routes are behind the auth middleware except /docs which uses
 /// a redirect-to-login middleware for unauthenticated users.
@@ -61,13 +82,18 @@ pub fn build(
         (router, api)
     };
 
-    // /docs is served outside the auth layer; unauthenticated users see a redirect to /login
-    let docs_routes: Router<ApiState> =
-        utoipa_scalar::Scalar::with_url("/docs", openapi_spec).into();
-    let docs_routes = docs_routes.route_layer(axum::middleware::from_fn_with_state(
-        db.clone(),
-        middleware::docs_auth_redirect,
-    ));
+    // /docs is served outside the auth layer; unauthenticated users see a redirect to /login.
+    // The Scalar API reference bundle is self-hosted (see memayu-web static assets) so it works
+    // under the app's strict `script-src 'self'` CSP instead of loading a CDN script.
+    let docs_routes: Router<ApiState> = Router::new()
+        .route(
+            "/docs",
+            get(move || async move { Html(render_scalar_page(&openapi_spec)) }),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            db.clone(),
+            middleware::docs_auth_redirect,
+        ));
 
     // Auth routes (public — /api prefix) — with IP-based rate limiting
     let auth_routes = Router::new()
