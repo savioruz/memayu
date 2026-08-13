@@ -10,3 +10,6 @@ cargo clippy --all-targets -- -D warnings
 
 echo "[pre-commit] test"
 cargo test
+
+echo "[pre-commit] audit"
+cargo audit
