@@ -10,15 +10,23 @@ memayu-config = { path = "../../crates/memayu-config" }
 memayu-storage-libsql = { path = "../../crates/memayu-storage-libsql" }
 memayu-storage-postgres = { path = "../../crates/memayu-storage-postgres" }
 memayu-llm-client = { path = "../../crates/memayu-llm-client" }
-memayu-api = { path = "../../crates/memayu-api" }
-memayu-web = { path = "../../crates/memayu-web" }
-memayu-mcp = { path = "../../crates/memayu-mcp" }
+
+# Optional frontend plugins
+memayu-api = { path = "../../crates/memayu-api", optional = true }
+memayu-web = { path = "../../crates/memayu-web", optional = true }
+memayu-mcp = { path = "../../crates/memayu-mcp", optional = true }
+
 tokio = { version = "1", features = ["full"] }
-axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
+axum = { version = "0.8", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
 dialoguer = "0.11"
 console = "0.15"
-dirs = "6"
 toml = "0.8"
+
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:crossterm"]
+web = ["dep:memayu-api", "dep:memayu-web", "dep:axum"]
+mcp = ["dep:memayu-mcp", "dep:reqwest"]
