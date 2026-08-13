@@ -1,5 +1,6 @@
 mod error;
 pub mod extraction;
+pub mod fusion;
 mod memory;
 mod ports;
 mod service;

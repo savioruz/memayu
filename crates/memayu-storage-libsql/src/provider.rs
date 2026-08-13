@@ -83,6 +83,7 @@ impl StorageProvider for LibsqlProvider {
             )
             .await
             .map_err(|e| StorageError::Other(format!("save memory: {e}")))?;
+        self.upsert_fts(mem).await?;
         Ok(())
     }
 
@@ -123,6 +124,46 @@ impl StorageProvider for LibsqlProvider {
         }
         // Re-sort by similarity descending since we computed our own scores.
         out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(out)
+    }
+
+    async fn search_fulltext(
+        &self,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(Memory, f32)>, StorageError> {
+        // BM25 is the native FTS5 relevance signal (higher = better). The
+        // column ORDER must match `COLUMNS` so `memory_from_row` can read it.
+        let sql = "SELECT m.id, m.user_id, m.content, m.embedding, m.metadata,
+                          m.created_at, m.updated_at, bm25(memories_fts) AS score
+                   FROM memories_fts
+                   JOIN memories m ON m.id = memories_fts.id
+                   WHERE memories_fts MATCH ?1 AND m.user_id = ?2
+                   ORDER BY score ASC LIMIT ?3";
+        let mut rows = self
+            .conn
+            .query(sql, (query, user_id, limit as i64))
+            .await
+            .map_err(|e| StorageError::Other(format!("full-text search: {e}")))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StorageError::Other(format!("iterate full-text search: {e}")))?
+        {
+            let mut mem = memory_from_row(&row)?;
+            mem.vector = crate::row::blob_f32(
+                &row.get::<Vec<u8>>(3)
+                    .map_err(|e| StorageError::Other(format!("read vector from fts: {e}")))?,
+            );
+            let score: f64 = row
+                .get(7)
+                .map_err(|e| StorageError::Other(format!("read fts score: {e}")))?;
+            // BM25 returns smaller scores for better matches; negate so the
+            // fused RRF ordering is "higher = better" like the vector leg.
+            out.push((mem, (-score) as f32));
+        }
         Ok(out)
     }
 
@@ -172,6 +213,33 @@ impl StorageProvider for LibsqlProvider {
             .execute("DELETE FROM memories WHERE id = ?1", vec![memory_id])
             .await
             .map_err(|e| StorageError::Other(format!("delete memory: {e}")))?;
+        self.conn
+            .execute("DELETE FROM memories_fts WHERE id = ?1", vec![memory_id])
+            .await
+            .map_err(|e| StorageError::Other(format!("delete memory from fts: {e}")))?;
+        Ok(())
+    }
+}
+
+impl LibsqlProvider {
+    /// Keep the FTS5 index in lockstep with `memories`. Delete-then-insert is
+    /// idempotent for both INSERT and UPDATE paths, so a single helper covers
+    /// both (issue #20).
+    async fn upsert_fts(&self, mem: &Memory) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "DELETE FROM memories_fts WHERE id = ?1",
+                vec![mem.id.as_str()],
+            )
+            .await
+            .map_err(|e| StorageError::Other(format!("clear fts row: {e}")))?;
+        self.conn
+            .execute(
+                "INSERT INTO memories_fts (content, id, user_id) VALUES (?1, ?2, ?3)",
+                (mem.content.as_str(), mem.id.as_str(), mem.user_id.as_str()),
+            )
+            .await
+            .map_err(|e| StorageError::Other(format!("index memory in fts: {e}")))?;
         Ok(())
     }
 }
@@ -271,5 +339,128 @@ mod tests {
                 got: 2
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn fulltext_search_matches_and_ranks() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        provider
+            .save_memory(&mem("m1", "u1", "User lives in Jakarta", &[1.0, 0.0, 0.0]))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem(
+                "m2",
+                "u1",
+                "User likes Bandung coffee",
+                &[0.0, 1.0, 0.0],
+            ))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem(
+                "m3",
+                "u2",
+                "User lives in Jakarta too",
+                &[0.0, 0.0, 1.0],
+            ))
+            .await
+            .unwrap();
+
+        let results = provider.search_fulltext("u1", "Jakarta", 5).await.unwrap();
+        assert_eq!(results.len(), 1, "only u1 rows match, u2 is excluded");
+        assert_eq!(results[0].0.id, "m1");
+    }
+
+    #[tokio::test]
+    async fn fulltext_index_updates_with_content() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        let m = mem("m1", "u1", "original wording", &[1.0, 0.0, 0.0]);
+        provider.save_memory(&m).await.unwrap();
+        assert!(
+            provider
+                .search_fulltext("u1", "wording", 5)
+                .await
+                .unwrap()
+                .len()
+                == 1
+        );
+
+        let updated = Memory {
+            content: "renamed phrasing".into(),
+            updated_at: Utc::now(),
+            ..m.clone()
+        };
+        provider.save_memory(&updated).await.unwrap();
+
+        assert!(
+            provider
+                .search_fulltext("u1", "wording", 5)
+                .await
+                .unwrap()
+                .is_empty(),
+            "stale content must be removed from the index"
+        );
+        assert_eq!(
+            provider.search_fulltext("u1", "phrasing", 5).await.unwrap()[0]
+                .0
+                .id,
+            "m1"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfills_fts_for_preexisting_memories() {
+        // Simulate an existing self-hosted database created before the FTS5
+        // table existed: write the old `memories` schema plus one row, then
+        // reopen through LibsqlProvider. The upgrade path must backfill the
+        // row so the full-text leg can find it without a re-save.
+        let path = std::env::temp_dir().join(format!(
+            "memayu-fts-backfill-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let path_str = path.to_string_lossy().to_string();
+
+        {
+            let db = libsql::Builder::new_local(&path_str).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute(
+                "CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding FLOAT32(3) NOT NULL,
+                    metadata TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memories
+                    (id, user_id, content, embedding, metadata, created_at, updated_at)
+                 VALUES
+                    ('legacy1', 'u1', 'legacy jakarta note', X'0000803F0000000000000000',
+                     '{}', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+                (),
+            )
+            .await
+            .unwrap();
+        } // drop the old-schema database and close the file
+
+        let provider = LibsqlProvider::open(&path_str, 3).await.unwrap();
+        let results = provider.search_fulltext("u1", "jakarta", 5).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "pre-upgrade row must be backfilled into the FTS index"
+        );
+        assert_eq!(results[0].0.id, "legacy1");
+
+        drop(provider);
+        let _ = std::fs::remove_file(&path);
     }
 }

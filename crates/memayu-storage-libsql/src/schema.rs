@@ -57,7 +57,36 @@ pub async fn create_schema(conn: &Connection, dimension: usize) -> Result<usize,
             dim
         }
     };
+    create_fts(conn).await?;
     Ok(stored_dim)
+}
+
+/// Create the FTS5 virtual table used for the full-text leg of hybrid search.
+///
+/// `id` and `user_id` are `UNINDEXED` so they can be joined back to `memories`
+/// without polluting the full-text match columns. The virtual table is kept in
+/// sync by `LibsqlProvider` (delete-then-insert on save/update/delete), which
+/// mirrors `memories` 1:1. See issue #20.
+///
+/// Also backfills any rows that predate the FTS index, so upgrading an
+/// existing database does not silently lose its full-text signal. The backfill
+/// only inserts missing ids, keeping repeated opens idempotent and cheap.
+pub async fn create_fts(conn: &Connection) -> Result<(), StorageError> {
+    let sql = "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+               USING fts5(content, id UNINDEXED, user_id UNINDEXED)";
+    conn.execute(sql, ())
+        .await
+        .map_err(|e| StorageError::Other(format!("create memories_fts table: {e}")))?;
+
+    conn.execute(
+        "INSERT INTO memories_fts (content, id, user_id)
+         SELECT content, id, user_id FROM memories
+         WHERE id NOT IN (SELECT id FROM memories_fts)",
+        (),
+    )
+    .await
+    .map_err(|e| StorageError::Other(format!("backfill memories_fts: {e}")))?;
+    Ok(())
 }
 
 /// Extract the dimension from `embedding FLOAT32(N)` in a CREATE TABLE DDL.

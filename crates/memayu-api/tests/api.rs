@@ -50,6 +50,24 @@ mod tests {
                 .map(|m| (m, 0.9))
                 .collect())
         }
+        async fn search_fulltext(
+            &self,
+            user_id: &str,
+            query: &str,
+            limit: usize,
+        ) -> Result<Vec<(Memory, f32)>, StorageError> {
+            let needle = query.to_lowercase();
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.user_id == user_id && m.content.to_lowercase().contains(&needle))
+                .take(limit)
+                .cloned()
+                .map(|m| (m, 1.0))
+                .collect())
+        }
         async fn list_memories(
             &self,
             user_id: &str,
