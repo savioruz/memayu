@@ -8,6 +8,7 @@ description = "Memayu Axum HTTP API — auth, memory, API keys, request logging"
 memayu-core = { path = "../memayu-core" }
 memayu-config = { path = "../memayu-config" }
 memayu-llm-client = { path = "../memayu-llm-client" }
+memayu-identity = { path = "../memayu-identity" }
 axum = { version = "0.8", features = ["macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -35,7 +35,15 @@ pub trait MemoryBackend: Send + Sync {
 // ── Concrete Backend ──
 
 pub enum Backend {
-    Local(Arc<MemoryService>),
+    /// In-process frontend talking to [`MemoryService`] directly. The tool
+    /// payloads still carry a `user_id` (defaulting to `"default"` for
+    /// compatibility), but in self-hosted mode the instance has a single admin
+    /// account, so the local backend ignores that value and always resolves to
+    /// `account_id` (#32).
+    Local {
+        service: Arc<MemoryService>,
+        account_id: String,
+    },
     Cloud {
         base_url: String,
         api_key: Option<String>,
@@ -47,8 +55,11 @@ pub enum Backend {
 impl MemoryBackend for Backend {
     async fn add_memory(&self, user_id: &str, content: &str) -> Result<Memory, McpError> {
         match self {
-            Backend::Local(svc) => Ok(svc
-                .add_memory(user_id, content, &Metadata::default())
+            Backend::Local {
+                service,
+                account_id,
+            } => Ok(service
+                .add_memory(account_id, content, &Metadata::default())
                 .await?),
             Backend::Cloud {
                 base_url,
@@ -95,7 +106,10 @@ impl MemoryBackend for Backend {
         limit: usize,
     ) -> Result<Vec<(Memory, f32)>, McpError> {
         match self {
-            Backend::Local(svc) => Ok(svc.search_memory(user_id, query, limit).await?),
+            Backend::Local {
+                service,
+                account_id,
+            } => Ok(service.search_memory(account_id, query, limit).await?),
             Backend::Cloud {
                 base_url,
                 api_key,
@@ -153,7 +167,10 @@ impl MemoryBackend for Backend {
 
     async fn list_memories(&self, user_id: &str, limit: usize) -> Result<Vec<Memory>, McpError> {
         match self {
-            Backend::Local(svc) => Ok(svc.list_memories(user_id, limit).await?),
+            Backend::Local {
+                service,
+                account_id,
+            } => Ok(service.list_memories(account_id, limit).await?),
             Backend::Cloud {
                 base_url,
                 api_key,
@@ -207,8 +224,8 @@ impl MemoryBackend for Backend {
 
     async fn delete_memory(&self, memory_id: &str) -> Result<(), McpError> {
         match self {
-            Backend::Local(svc) => {
-                svc.delete_memory(memory_id).await?;
+            Backend::Local { service, .. } => {
+                service.delete_memory(memory_id).await?;
                 Ok(())
             }
             Backend::Cloud {
@@ -238,7 +255,7 @@ impl MemoryBackend for Backend {
 
     async fn update_memory(&self, memory_id: &str, content: &str) -> Result<Memory, McpError> {
         match self {
-            Backend::Local(svc) => Ok(svc.update_memory(memory_id, content).await?),
+            Backend::Local { service, .. } => Ok(service.update_memory(memory_id, content).await?),
             Backend::Cloud {
                 base_url,
                 api_key,

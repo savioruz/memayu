@@ -1627,6 +1627,7 @@ dependencies = [
  "memayu-api",
  "memayu-config",
  "memayu-core",
+ "memayu-identity",
  "memayu-llm-client",
  "memayu-mcp",
  "memayu-storage-libsql",
@@ -1650,6 +1651,7 @@ dependencies = [
  "libsql",
  "memayu-config",
  "memayu-core",
+ "memayu-identity",
  "memayu-llm-client",
  "rand 0.8.7",
  "serde",
@@ -1684,6 +1686,22 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "memayu-identity"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "libsql",
+ "memayu-config",
+ "rand 0.8.7",
+ "sha2 0.10.9",
+ "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "uuid",

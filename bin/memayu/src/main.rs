@@ -2,6 +2,8 @@
 mod service;
 #[cfg(feature = "tui")]
 mod tui;
+#[cfg(feature = "tui")]
+mod tui_setup;
 mod wizard;
 
 #[cfg(feature = "web")]
@@ -159,6 +161,20 @@ async fn cmd_serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let registry =
         memayu_api::load_registry(&api_db, config.llm.clone(), config.embedder.clone()).await?;
 
+    // One-time migration: re-assign any legacy placeholder memory rows
+    // (e.g. "default") to the admin account so every frontend sees the same
+    // store (#32). On a fresh instance there is no admin yet — setup creates
+    // one — so a missing account is expected and not an error here.
+    if let Ok(admin_id) = memayu_identity::resolve_self_hosted_account_id(&config.storage).await {
+        if let Ok(n) =
+            memayu_identity::backfill_placeholder_memories(&config.storage, &admin_id).await
+        {
+            if n > 0 {
+                println!("[memayu] reassigned {n} legacy memory rows to the admin account");
+            }
+        }
+    }
+
     let api = memayu_api::build_api_router(api_db.clone(), service.clone(), registry.clone());
     let web = memayu_web::build_web_router(api_db, service, registry);
 
@@ -190,7 +206,12 @@ async fn cmd_mcp(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         })
     } else {
         let (service, _) = service::build_service(&config).await?;
-        Arc::new(Backend::Local(service))
+        // In-process MCP shares the instance's single admin account (#32).
+        let account_id = memayu_identity::bootstrap(&config.storage).await?;
+        Arc::new(Backend::Local {
+            service,
+            account_id,
+        })
     };
 
     memayu_mcp::run(backend).await;

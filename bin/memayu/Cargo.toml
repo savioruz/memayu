@@ -10,6 +10,7 @@ memayu-config = { path = "../../crates/memayu-config" }
 memayu-storage-libsql = { path = "../../crates/memayu-storage-libsql" }
 memayu-storage-postgres = { path = "../../crates/memayu-storage-postgres" }
 memayu-llm-client = { path = "../../crates/memayu-llm-client" }
+memayu-identity = { path = "../../crates/memayu-identity" }
 
 # Optional frontend plugins
 memayu-api = { path = "../../crates/memayu-api", optional = true }
