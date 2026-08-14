@@ -824,4 +824,93 @@ mod tests {
         assert_ne!(result.id, "m1");
         assert_eq!(svc.list_memories("u1", 10).await.unwrap().len(), 2);
     }
+
+    struct SplitMockStorage {
+        vector_rows: Vec<Memory>,
+        fulltext_rows: Vec<Memory>,
+    }
+
+    #[async_trait]
+    impl StorageProvider for SplitMockStorage {
+        async fn save_memory(&self, _mem: &Memory) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn search_memory(
+            &self,
+            _user_id: &str,
+            _vector: &[f32],
+            limit: usize,
+        ) -> Result<Vec<(Memory, f32)>, StorageError> {
+            Ok(self
+                .vector_rows
+                .iter()
+                .take(limit)
+                .cloned()
+                .map(|m| (m, 0.9))
+                .collect())
+        }
+        async fn search_fulltext(
+            &self,
+            _user_id: &str,
+            _query: &str,
+            limit: usize,
+        ) -> Result<Vec<(Memory, f32)>, StorageError> {
+            Ok(self
+                .fulltext_rows
+                .iter()
+                .take(limit)
+                .cloned()
+                .map(|m| (m, 0.9))
+                .collect())
+        }
+        async fn list_memories(
+            &self,
+            _user_id: &str,
+            _limit: usize,
+        ) -> Result<Vec<Memory>, StorageError> {
+            Ok(vec![])
+        }
+        async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
+            Err(StorageError::Other(format!("memory {memory_id} not found")))
+        }
+        async fn delete_memory(&self, _memory_id: &str) -> Result<(), StorageError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_merges_vector_and_fulltext_results() {
+        let storage = SplitMockStorage {
+            vector_rows: vec![mem("a", "u1", "vector-only hit")],
+            fulltext_rows: vec![mem("b", "u1", "full-text-only hit")],
+        };
+        let svc = MemoryService::new(
+            Arc::new(storage),
+            Arc::new(MockEmbedder),
+            Arc::new(MockLlm::scripted(vec![])),
+        );
+
+        let results = svc.search_memory("u1", "query", 10).await.unwrap();
+
+        let mut ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["a", "b"], "both retrieval legs must contribute");
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_ranks_double_match_above_single() {
+        let storage = SplitMockStorage {
+            vector_rows: vec![mem("a", "u1", "both")],
+            fulltext_rows: vec![mem("b", "u1", "full-text only"), mem("a", "u1", "both")],
+        };
+        let svc = MemoryService::new(
+            Arc::new(storage),
+            Arc::new(MockEmbedder),
+            Arc::new(MockLlm::scripted(vec![])),
+        );
+
+        let results = svc.search_memory("u1", "query", 10).await.unwrap();
+
+        assert_eq!(results[0].0.id, "a", "present in both lists wins under RRF");
+    }
 }
