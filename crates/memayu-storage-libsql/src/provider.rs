@@ -373,6 +373,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hybrid_search_fuses_vector_and_fulltext_signals() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        // m1 is the top vector hit but does not match the full-text keyword;
+        // m2 is a weaker vector hit that the full-text leg also matches.
+        provider
+            .save_memory(&mem("m1", "u1", "alpha bravo", &[1.0, 0.0, 0.0]))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem("m2", "u1", "charlie keyword", &[0.0, 1.0, 0.0]))
+            .await
+            .unwrap();
+
+        let vector_hits = provider
+            .search_memory("u1", &[0.9, 0.1, 0.0], 10)
+            .await
+            .unwrap();
+        assert_eq!(vector_hits[0].0.id, "m1", "m1 is the top vector hit");
+        let fulltext_hits = provider.search_fulltext("u1", "charlie", 10).await.unwrap();
+        assert_eq!(fulltext_hits[0].0.id, "m2", "full-text matches m2 only");
+
+        let fused = memayu_core::fusion::fuse(&vector_hits, &fulltext_hits, 10);
+        assert_eq!(
+            fused[0].0.id, "m2",
+            "RRF boost from the full-text leg reorders m2 above the top vector hit"
+        );
+    }
+
+    #[tokio::test]
     async fn fulltext_index_updates_with_content() {
         let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
         let m = mem("m1", "u1", "original wording", &[1.0, 0.0, 0.0]);
