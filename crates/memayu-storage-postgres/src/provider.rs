@@ -169,8 +169,8 @@ impl StorageProvider for PostgresProvider {
     ) -> Result<Vec<(Memory, f32)>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, user_id, content, embedding, metadata, created_at, updated_at,
-                    ts_rank(content_tsv, websearch_to_tsquery('english', $1)) AS score
-             FROM memories WHERE user_id = $2 AND content_tsv @@ websearch_to_tsquery('english', $1)
+                    ts_rank(content_tsv, plainto_tsquery('english', $1)) AS score
+             FROM memories WHERE user_id = $2 AND content_tsv @@ plainto_tsquery('english', $1)
              ORDER BY score DESC
              LIMIT $3",
         )
@@ -310,5 +310,61 @@ mod tests {
         assert!(results[0].1 > results[1].1, "similarity descending");
         provider.delete_memory(&m1.id).await.unwrap();
         provider.delete_memory(&m2.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fulltext_search_special_characters_are_literal() {
+        let url = match test_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let provider = PostgresProvider::connect(&url, 3).await.unwrap();
+        let m1 = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "u1".into(),
+            content: "User's project costs $500!".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: HashMap::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        provider.save_memory(&m1).await.unwrap();
+
+        // plainto_tsquery must treat FTS-reserved characters as literal text,
+        // never raising, and still match the row that contains them.
+        let results = provider
+            .search_fulltext("u1", "User's project costs $500!", 5)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "special-char query is literal, no crash");
+        assert_eq!(results[0].0.id, m1.id);
+        provider.delete_memory(&m1.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fulltext_search_emoji_and_non_ascii_input() {
+        let url = match test_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let provider = PostgresProvider::connect(&url, 3).await.unwrap();
+        let m1 = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "u1".into(),
+            content: "plan 🚀 Q3 launch 💡 ideas".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: HashMap::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        provider.save_memory(&m1).await.unwrap();
+
+        let results = provider
+            .search_fulltext("u1", "plan 🚀 Q3 launch 💡 ideas!", 5)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "emoji query is literal, no crash");
+        assert_eq!(results[0].0.id, m1.id);
+        provider.delete_memory(&m1.id).await.unwrap();
     }
 }
