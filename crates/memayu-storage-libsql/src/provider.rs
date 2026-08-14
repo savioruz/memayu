@@ -40,6 +40,10 @@ impl LibsqlProvider {
 }
 const COLUMNS: &str = "id, user_id, content, embedding, metadata, created_at, updated_at";
 
+fn sanitize_fts5_query(raw: &str) -> String {
+    format!("\"{}\"", raw.replace('"', "\"\""))
+}
+
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let (dot, norm_a, norm_b) = a
         .iter()
@@ -141,9 +145,12 @@ impl StorageProvider for LibsqlProvider {
                    JOIN memories m ON m.id = memories_fts.id
                    WHERE memories_fts MATCH ?1 AND m.user_id = ?2
                    ORDER BY score ASC LIMIT ?3";
+        // Treat the query as a literal phrase so FTS5 special characters in
+        // ordinary user input ($, !, ", *, :, ^, AND/OR/NOT) cannot crash MATCH.
+        let fts_query = sanitize_fts5_query(query);
         let mut rows = self
             .conn
-            .query(sql, (query, user_id, limit as i64))
+            .query(sql, (fts_query.as_str(), user_id, limit as i64))
             .await
             .map_err(|e| StorageError::Other(format!("full-text search: {e}")))?;
         let mut out = Vec::new();
@@ -369,6 +376,77 @@ mod tests {
 
         let results = provider.search_fulltext("u1", "Jakarta", 5).await.unwrap();
         assert_eq!(results.len(), 1, "only u1 rows match, u2 is excluded");
+        assert_eq!(results[0].0.id, "m1");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_wraps_query_in_escaped_literal_phrase() {
+        assert_eq!(sanitize_fts5_query("Jakarta"), "\"Jakarta\"");
+        assert_eq!(
+            sanitize_fts5_query(r#"he said "hi" $5*:^! OR"#),
+            r#""he said ""hi"" $5*:^! OR""#
+        );
+        assert_eq!(sanitize_fts5_query(""), "\"\"");
+    }
+
+    #[tokio::test]
+    async fn fulltext_search_special_characters_are_literal() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        provider
+            .save_memory(&mem(
+                "m1",
+                "u1",
+                "User's project costs $500! It has an AND and OR and NOT flag",
+                &[1.0, 0.0, 0.0],
+            ))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem(
+                "m2",
+                "u1",
+                "plain unrelated content",
+                &[0.0, 1.0, 0.0],
+            ))
+            .await
+            .unwrap();
+
+        let results = provider
+            .search_fulltext("u1", "User's project costs $500!", 5)
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "special-char query is treated as literal text"
+        );
+        assert_eq!(results[0].0.id, "m1");
+
+        let results = provider
+            .search_fulltext("u1", "cats AND dogs OR birds NOT fish", 5)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 0, "boolean keywords are literal, no crash");
+    }
+
+    #[tokio::test]
+    async fn fulltext_search_emoji_and_non_ascii_input() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        provider
+            .save_memory(&mem(
+                "m1",
+                "u1",
+                "plan 🚀 Q3 launch 💡 ideas",
+                &[1.0, 0.0, 0.0],
+            ))
+            .await
+            .unwrap();
+
+        let results = provider
+            .search_fulltext("u1", "plan 🚀 Q3 launch 💡 ideas!", 5)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "emoji query is treated as literal text");
         assert_eq!(results[0].0.id, "m1");
     }
 
