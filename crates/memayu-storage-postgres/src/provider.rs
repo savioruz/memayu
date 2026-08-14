@@ -183,11 +183,13 @@ impl StorageProvider for PostgresProvider {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let score: f64 = row
+            // ts_rank returns `real` (FLOAT4), so decode directly as f32 to
+            // match the StorageProvider contract instead of a FLOAT8 cast.
+            let score: f32 = row
                 .try_get("score")
                 .map_err(|e| StorageError::Other(format!("read full-text score: {e}")))?;
             let mem = memory_from_row(&row)?;
-            out.push((mem, score as f32));
+            out.push((mem, score));
         }
         Ok(out)
     }

@@ -144,7 +144,7 @@ impl DbClient {
             }
             DbClient::Postgres(pool) => {
                 let (total, avg_latency, success_rate): (i64, f64, f64) = sqlx::query_as(
-                    "SELECT COUNT(*), COALESCE(AVG(latency_ms),0), SUM(CASE WHEN status>=200 AND status<300 THEN 1 ELSE 0 END)::float / GREATEST(1,COUNT(*)) * 100 FROM request_logs"
+                    "SELECT COUNT(*), COALESCE(AVG(latency_ms),0), COALESCE(SUM(CASE WHEN status>=200 AND status<300 THEN 1 ELSE 0 END)::float / GREATEST(1,COUNT(*)) * 100, 0) FROM request_logs"
                 )
                 .fetch_one(pool)
                 .await

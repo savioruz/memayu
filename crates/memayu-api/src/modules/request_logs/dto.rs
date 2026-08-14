@@ -13,7 +13,7 @@ fn default_request_log_limit() -> usize {
 #[derive(Debug, serde::Serialize)]
 pub struct RequestLogStats {
     pub total: i64,
-    pub avg_latency_ms: f64,
+    pub avg_latency_ms: Option<f64>,
     pub success_rate: f64,
 }
 
