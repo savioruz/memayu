@@ -44,7 +44,7 @@ pub async fn get_request_logs(
             .collect(),
         stats: RequestLogStats {
             total,
-            avg_latency_ms: avg,
+            avg_latency_ms: Some(avg),
             success_rate: rate,
         },
         limit: q.limit,
