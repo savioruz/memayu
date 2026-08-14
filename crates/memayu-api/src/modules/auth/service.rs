@@ -3,7 +3,11 @@ use crate::infrastructure::db::DbClient;
 use crate::modules::auth::dto::{AuthResponse, LoginRequest, SetupRequest};
 use chrono::Duration;
 use rand::Rng;
-use sha2::{Digest, Sha256};
+
+// Password rules, hashing, and salt generation live in `memayu-identity` so the
+// terminal first-run setup and the web `POST /api/auth/setup` flow share the
+// exact same account-creation logic (#32).
+pub use memayu_identity::{hash_password, new_salt, validate_password};
 
 pub const SESSION_COOKIE: &str = "memayu_session";
 /// Session lifetime in seconds (1 day).
@@ -14,19 +18,7 @@ pub fn expires_at_rfc3339(duration_secs: i64) -> String {
     (chrono::Utc::now() + Duration::seconds(duration_secs)).to_rfc3339()
 }
 
-// ── crypto / token helpers ──
-
-pub fn hash_password(salt: &str, password: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update(password.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-pub fn new_salt() -> String {
-    let mut rng = rand::rngs::OsRng;
-    hex::encode(rng.gen::<[u8; 16]>())
-}
+// ── token helpers ──
 
 pub fn new_token() -> String {
     let mut rng = rand::rngs::OsRng;
@@ -73,22 +65,9 @@ pub async fn resolve_session_with_email(
 }
 
 // ── password validation ──
-
-pub fn validate_password(password: &str) -> Option<&'static str> {
-    if password.len() < 8 {
-        return Some("Password must be at least 8 characters.");
-    }
-    if !password.chars().any(|c| c.is_uppercase()) {
-        return Some("Password must contain at least one uppercase letter.");
-    }
-    if !password.chars().any(|c| c.is_lowercase()) {
-        return Some("Password must contain at least one lowercase letter.");
-    }
-    if !password.chars().any(|c| c.is_ascii_digit()) {
-        return Some("Password must contain at least one digit.");
-    }
-    None
-}
+//
+// `validate_password` is re-exported from `memayu-identity` at the top of this
+// module (see above).
 
 // ── Business-logic functions (transport agnostic) ──
 

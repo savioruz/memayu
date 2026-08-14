@@ -15,8 +15,6 @@ use ratatui::{
 };
 use std::sync::Arc;
 
-const DEFAULT_USER: &str = "default";
-
 enum Mode {
     Normal,
     Search,
@@ -26,6 +24,7 @@ enum Mode {
 
 pub struct App {
     service: Arc<MemoryService>,
+    account_id: String,
     memories: Vec<Memory>,
     input: String,
     cursor: usize,
@@ -35,9 +34,10 @@ pub struct App {
 }
 
 impl App {
-    fn new(service: Arc<MemoryService>) -> Self {
+    fn new(service: Arc<MemoryService>, account_id: String) -> Self {
         Self {
             service,
+            account_id,
             memories: Vec::new(),
             input: String::new(),
             cursor: 0,
@@ -57,7 +57,11 @@ impl App {
     }
 
     async fn load(&mut self) {
-        match self.service.list_memories(DEFAULT_USER, self.limit).await {
+        match self
+            .service
+            .list_memories(&self.account_id, self.limit)
+            .await
+        {
             Ok(memories) => {
                 self.status = format!("{} memories (limit {})", memories.len(), self.limit);
                 self.memories = memories;
@@ -71,7 +75,7 @@ impl App {
         self.input.clear();
         match self
             .service
-            .search_memory(DEFAULT_USER, &query, self.limit)
+            .search_memory(&self.account_id, &query, self.limit)
             .await
         {
             Ok(results) => {
@@ -91,7 +95,7 @@ impl App {
         }
         match self
             .service
-            .add_memory(DEFAULT_USER, &content, &Default::default())
+            .add_memory(&self.account_id, &content, &Default::default())
             .await
         {
             Ok(_) => self.status = "memory saved".into(),
@@ -176,10 +180,27 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let (service, dimension) = crate::service::build_service(&config).await?;
 
+    // In-process frontends share the instance's single admin account. Resolve
+    // it (backfilling any legacy placeholder rows) or refuse to start so the
+    // user isn't silently writing to a "default" memory space (#32).
+    let account_id = match memayu_identity::bootstrap(&config.storage).await {
+        Ok(id) => id,
+        Err(memayu_identity::IdentityError::NoAdminAccount) => {
+            // First run: no admin account yet. Run the in-process setup wizard
+            // to create one directly — no shelling out to `memayu serve` + the
+            // browser, so the TUI still works standalone on a headless VPS (#32).
+            match crate::tui_setup::run_setup(&config).await {
+                Some(id) => id,
+                None => std::process::exit(1),
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     let mut terminal = ratatui::init();
     terminal.clear()?;
 
-    let mut app = App::new(service);
+    let mut app = App::new(service, account_id);
     app.status = format!(
         "embedder dimension = {dimension} ({}) | extraction mode = {}",
         config.embedder.model, config.extraction_mode

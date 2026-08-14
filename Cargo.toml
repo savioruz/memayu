@@ -6,6 +6,7 @@ members = [
     "crates/memayu-storage-libsql",
     "crates/memayu-storage-postgres",
     "crates/memayu-llm-client",
+    "crates/memayu-identity",
     "crates/memayu-api",
     "crates/memayu-web",
     "crates/memayu-mcp",

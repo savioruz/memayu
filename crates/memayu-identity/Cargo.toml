@@ -1,0 +1,19 @@
+[package]
+name = "memayu-identity"
+version.workspace = true
+edition.workspace = true
+description = "Self-hosted single-admin identity resolution and legacy placeholder backfill"
+
+[dependencies]
+memayu-config = { path = "../memayu-config" }
+libsql = { version = "0.9", default-features = false, features = ["core"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
