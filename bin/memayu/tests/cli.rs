@@ -58,8 +58,9 @@ fn temp_db_path() -> std::path::PathBuf {
 }
 
 /// Run the real `memayu` binary with an isolated raw-mode config pointing at
-/// the given mock embedder port and libsql path. Returns (exit_code, stdout).
-fn run_memayu(args: &[&str], port: u16, db: &std::path::Path) -> (i32, String) {
+/// the given mock embedder port and libsql path. Returns
+/// (exit_code, stdout, stderr).
+fn run_memayu_full(args: &[&str], port: u16, db: &std::path::Path) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_memayu"))
         .args(args)
         .env("MEMAYU_EXTRACTION_MODE", "raw")
@@ -79,7 +80,13 @@ fn run_memayu(args: &[&str], port: u16, db: &std::path::Path) -> (i32, String) {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     eprintln!("exit={} stderr={stderr}", out.status.code().unwrap_or(-1));
-    (out.status.code().unwrap_or(-1), stdout)
+    (out.status.code().unwrap_or(-1), stdout, stderr)
+}
+
+/// Convenience wrapper returning only (exit_code, stdout).
+fn run_memayu(args: &[&str], port: u16, db: &std::path::Path) -> (i32, String) {
+    let (code, stdout, _stderr) = run_memayu_full(args, port, db);
+    (code, stdout)
 }
 
 #[test]
@@ -113,8 +120,16 @@ fn add_then_list_get_search_delete_roundtrip() {
     // list --json
     let (code, stdout) = run_memayu(&["list", "--json"], port, &db);
     assert_eq!(code, 0);
-    let arr: serde_json::Value = serde_json::from_str(stdout.trim()).expect("list --json is JSON");
-    let arr = arr.as_array().expect("list --json is an array");
+    let obj: serde_json::Value = serde_json::from_str(stdout.trim()).expect("list --json is JSON");
+    let arr = obj["memories"].as_array().expect("memories is an array");
+    assert!(
+        obj["total"].as_u64().is_some(),
+        "list exposes the total row count"
+    );
+    assert!(
+        obj.get("next_cursor").is_some(),
+        "list exposes next_cursor (null on the last page)"
+    );
     assert!(arr.iter().any(|m| m["content"] == content));
     assert!(arr.iter().any(|m| m["id"] == id));
 
@@ -144,6 +159,73 @@ fn add_then_list_get_search_delete_roundtrip() {
     // list after delete -> gone
     let (code, stdout) = run_memayu(&["list", "--json"], port, &db);
     assert_eq!(code, 0);
-    let arr: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert!(arr.as_array().unwrap().iter().all(|m| m["id"] != id));
+    let obj: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(obj["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| m["id"] != id));
+}
+
+#[test]
+fn unknown_flag_and_invalid_values_are_rejected() {
+    let port = start_mock_embedder();
+    let db = temp_db_path();
+
+    // Unknown flag is rejected instead of being silently swallowed.
+    let (code, _stdout, stderr) = run_memayu_full(&["list", "--bogus"], port, &db);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("unknown option: --bogus"),
+        "stderr: {stderr}"
+    );
+
+    // Unknown option flag (one that consumes a value) is also rejected.
+    let (code, _stdout, stderr) = run_memayu_full(&["list", "--bogus", "x"], port, &db);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("unknown option: --bogus"),
+        "stderr: {stderr}"
+    );
+
+    // Zero limit is rejected.
+    let (code, _stdout, stderr) = run_memayu_full(&["list", "--limit", "0"], port, &db);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("must be at least 1"), "stderr: {stderr}");
+
+    // Over-cap limit is rejected with a clear message.
+    let (code, _stdout, stderr) = run_memayu_full(&["list", "--limit", "999"], port, &db);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("maximum is 100"), "stderr: {stderr}");
+
+    // Non-numeric limit gets a clear message.
+    let (code, _stdout, stderr) = run_memayu_full(&["list", "--limit", "abc"], port, &db);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("invalid --limit value"), "stderr: {stderr}");
+
+    // Malformed --filter is rejected.
+    let (code, _stdout, stderr) = run_memayu_full(&["list", "--filter", "nope"], port, &db);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("expected key=value"), "stderr: {stderr}");
+}
+
+#[test]
+fn list_exposes_paging_contract() {
+    let port = start_mock_embedder();
+    let db = temp_db_path();
+
+    // Empty store: total 0, explicit null next_cursor.
+    let (code, stdout) = run_memayu(&["list", "--json"], port, &db);
+    assert_eq!(code, 0);
+    let obj: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(obj["memories"].as_array().unwrap().len(), 0);
+    assert_eq!(obj["total"].as_u64(), Some(0));
+    assert!(obj["next_cursor"].is_null());
+
+    // A metadata filter runs and filters to the empty match set without error.
+    let (code, stdout) = run_memayu(&["list", "--json", "--filter", "source=cli"], port, &db);
+    assert_eq!(code, 0);
+    let obj: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(obj["memories"].as_array().unwrap().len(), 0);
+    assert_eq!(obj["total"].as_u64(), Some(0));
 }
