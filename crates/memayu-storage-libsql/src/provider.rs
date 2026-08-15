@@ -2,7 +2,9 @@ use crate::row::memory_from_row;
 use crate::schema::create_schema;
 use async_trait::async_trait;
 use libsql::Connection;
-use memayu_core::{Memory, StorageError, StorageProvider};
+use memayu_core::{
+    decode_cursor, encode_cursor, Memory, MemoryPage, MetadataFilter, StorageError, StorageProvider,
+};
 
 pub struct LibsqlProvider {
     conn: Connection,
@@ -42,6 +44,26 @@ const COLUMNS: &str = "id, user_id, content, embedding, metadata, created_at, up
 
 fn sanitize_fts5_query(raw: &str) -> String {
     format!("\"{}\"", raw.replace('"', "\"\""))
+}
+
+/// SQL fragment for exact key=value metadata predicates, using one `?` per
+/// path and per value. Must be paired with a matching sequence of bound params
+/// in the same order (path, value, path, value, ...).
+fn metadata_filter_clause(filter: &MetadataFilter) -> String {
+    let mut clause = String::new();
+    for _ in filter.keys() {
+        clause.push_str(" AND json_extract(metadata, ?) = ?");
+    }
+    clause
+}
+
+fn push_metadata_params(params: &mut Vec<libsql::Value>, filter: &MetadataFilter) {
+    for (key, value) in filter {
+        // Quote the key so dots, spaces, and other path characters are treated
+        // as literal JSON member names rather than path separators.
+        params.push(format!("$.\"{key}\"").into());
+        params.push(value.as_str().into());
+    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -96,17 +118,25 @@ impl StorageProvider for LibsqlProvider {
         user_id: &str,
         vector: &[f32],
         limit: usize,
+        filter: Option<&MetadataFilter>,
     ) -> Result<Vec<(Memory, f32)>, StorageError> {
         self.check_dim(vector)?;
         let blob = crate::row::f32_blob(vector);
-        let sql = format!(
+        let mut sql = format!(
             "SELECT {COLUMNS}, vector_distance_cos(embedding, ?1) AS score
-             FROM memories WHERE user_id = ?2
-             ORDER BY score ASC LIMIT ?3"
+             FROM memories WHERE user_id = ?2"
         );
+        let mut params: Vec<libsql::Value> = vec![blob.clone().into(), user_id.into()];
+        if let Some(f) = filter {
+            sql.push_str(&metadata_filter_clause(f));
+            push_metadata_params(&mut params, f);
+        }
+        sql.push_str(" ORDER BY score ASC LIMIT ?");
+        params.push((limit as i64).into());
+
         let mut rows = self
             .conn
-            .query(&sql, (blob.as_slice(), user_id, limit as i64))
+            .query(&sql, params)
             .await
             .map_err(|e| StorageError::Other(format!("search memories: {e}")))?;
         let mut out = Vec::new();
@@ -136,21 +166,30 @@ impl StorageProvider for LibsqlProvider {
         user_id: &str,
         query: &str,
         limit: usize,
+        filter: Option<&MetadataFilter>,
     ) -> Result<Vec<(Memory, f32)>, StorageError> {
         // BM25 is the native FTS5 relevance signal (higher = better). The
         // column ORDER must match `COLUMNS` so `memory_from_row` can read it.
-        let sql = "SELECT m.id, m.user_id, m.content, m.embedding, m.metadata,
+        let mut sql = "SELECT m.id, m.user_id, m.content, m.embedding, m.metadata,
                           m.created_at, m.updated_at, bm25(memories_fts) AS score
                    FROM memories_fts
                    JOIN memories m ON m.id = memories_fts.id
-                   WHERE memories_fts MATCH ?1 AND m.user_id = ?2
-                   ORDER BY score ASC LIMIT ?3";
+                   WHERE memories_fts MATCH ?1 AND m.user_id = ?2"
+            .to_string();
+        let mut params: Vec<libsql::Value> = vec![query.into(), user_id.into()];
+        if let Some(f) = filter {
+            sql.push_str(&metadata_filter_clause(f));
+            push_metadata_params(&mut params, f);
+        }
+        sql.push_str(" ORDER BY score ASC LIMIT ?");
+        params.push((limit as i64).into());
         // Treat the query as a literal phrase so FTS5 special characters in
         // ordinary user input ($, !, ", *, :, ^, AND/OR/NOT) cannot crash MATCH.
         let fts_query = sanitize_fts5_query(query);
+        params[0] = fts_query.into();
         let mut rows = self
             .conn
-            .query(sql, (fts_query.as_str(), user_id, limit as i64))
+            .query(&sql, params)
             .await
             .map_err(|e| StorageError::Other(format!("full-text search: {e}")))?;
         let mut out = Vec::new();
@@ -178,13 +217,40 @@ impl StorageProvider for LibsqlProvider {
         &self,
         user_id: &str,
         limit: usize,
-    ) -> Result<Vec<Memory>, StorageError> {
-        let sql = format!(
-            "SELECT {COLUMNS} FROM memories WHERE user_id = ?1 ORDER BY created_at DESC LIMIT ?2"
-        );
+        cursor: Option<&str>,
+        filter: Option<&MetadataFilter>,
+    ) -> Result<MemoryPage, StorageError> {
+        // Fetch one extra row so we can detect whether another page exists and
+        // derive the opaque next cursor from the last visible row.
+        let fetch = limit as i64 + 1;
+        let mut sql = format!("SELECT {COLUMNS} FROM memories WHERE user_id = ?1");
+        let mut params: Vec<libsql::Value> = vec![user_id.into()];
+        if let Some(f) = filter {
+            sql.push_str(&metadata_filter_clause(f));
+            push_metadata_params(&mut params, f);
+        }
+        // Total count of rows matching user + filter (cursor is windowing-only
+        // and must not affect the total).
+        let total = self.count_total(user_id, filter).await?;
+        if let Some(c) = cursor {
+            let (ts, id) = decode_cursor(c).ok_or_else(|| {
+                StorageError::InvalidCursor("invalid pagination cursor".to_string())
+            })?;
+            let ts_str = crate::row::ts_to_str(&ts);
+            sql.push_str(
+                " AND (julianday(created_at) < julianday(?) \
+                 OR (julianday(created_at) = julianday(?) AND id < ?))",
+            );
+            params.push(ts_str.clone().into());
+            params.push(ts_str.into());
+            params.push(id.into());
+        }
+        sql.push_str(" ORDER BY julianday(created_at) DESC, id DESC LIMIT ?");
+        params.push(fetch.into());
+
         let mut rows = self
             .conn
-            .query(&sql, (user_id, limit as i64))
+            .query(&sql, params)
             .await
             .map_err(|e| StorageError::Other(format!("list memories: {e}")))?;
         let mut out = Vec::new();
@@ -195,7 +261,16 @@ impl StorageProvider for LibsqlProvider {
         {
             out.push(memory_from_row(&row)?);
         }
-        Ok(out)
+
+        let next_cursor = if out.len() > limit {
+            let last = &out[limit - 1];
+            let cursor = encode_cursor(&last.created_at, &last.id);
+            out.truncate(limit);
+            Some(cursor)
+        } else {
+            None
+        };
+        Ok(MemoryPage::new(out, next_cursor, total))
     }
 
     async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
@@ -229,6 +304,37 @@ impl StorageProvider for LibsqlProvider {
 }
 
 impl LibsqlProvider {
+    /// Count all memories for a user matching the optional metadata filter,
+    /// regardless of pagination window.
+    async fn count_total(
+        &self,
+        user_id: &str,
+        filter: Option<&MetadataFilter>,
+    ) -> Result<usize, StorageError> {
+        let mut sql = String::from("SELECT COUNT(*) FROM memories WHERE user_id = ?1");
+        let mut params: Vec<libsql::Value> = vec![user_id.into()];
+        if let Some(f) = filter {
+            sql.push_str(&metadata_filter_clause(f));
+            push_metadata_params(&mut params, f);
+        }
+        let mut rows = self
+            .conn
+            .query(&sql, params)
+            .await
+            .map_err(|e| StorageError::Other(format!("count memories: {e}")))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| StorageError::Other(format!("iterate count: {e}")))?
+        {
+            Some(row) => row
+                .get::<i64>(0)
+                .map(|n| n as usize)
+                .map_err(|e| StorageError::Other(format!("read count: {e}"))),
+            None => Ok(0),
+        }
+    }
+
     /// Keep the FTS5 index in lockstep with `memories`. Delete-then-insert is
     /// idempotent for both INSERT and UPDATE paths, so a single helper covers
     /// both (issue #20).
@@ -276,13 +382,22 @@ mod tests {
         let m = mem("m1", "u1", "User lives in Jakarta", &[1.0, 0.0, 0.0]);
         provider.save_memory(&m).await.unwrap();
 
-        let list = provider.list_memories("u1", 10).await.unwrap();
+        let list = provider
+            .list_memories("u1", 10, None, None)
+            .await
+            .unwrap()
+            .memories;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].content, "User lives in Jakarta");
         assert_eq!(list[0].vector, vec![1.0, 0.0, 0.0]);
 
         provider.delete_memory("m1").await.unwrap();
-        assert!(provider.list_memories("u1", 10).await.unwrap().is_empty());
+        assert!(provider
+            .list_memories("u1", 10, None, None)
+            .await
+            .unwrap()
+            .memories
+            .is_empty());
     }
 
     #[tokio::test]
@@ -297,7 +412,11 @@ mod tests {
             ..m.clone()
         };
         provider.save_memory(&m2).await.unwrap();
-        let list = provider.list_memories("u1", 10).await.unwrap();
+        let list = provider
+            .list_memories("u1", 10, None, None)
+            .await
+            .unwrap()
+            .memories;
         assert_eq!(list.len(), 1, "upsert must not create a second row");
         assert_eq!(list[0].content, "User moved to Bandung");
     }
@@ -319,7 +438,7 @@ mod tests {
             .unwrap();
 
         let results = provider
-            .search_memory("u1", &[0.9, 0.1, 0.0], 3)
+            .search_memory("u1", &[0.9, 0.1, 0.0], 3, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 2, "scoped to user u1 only");
@@ -374,7 +493,10 @@ mod tests {
             .await
             .unwrap();
 
-        let results = provider.search_fulltext("u1", "Jakarta", 5).await.unwrap();
+        let results = provider
+            .search_fulltext("u1", "Jakarta", 5, None)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1, "only u1 rows match, u2 is excluded");
         assert_eq!(results[0].0.id, "m1");
     }
@@ -412,7 +534,7 @@ mod tests {
             .unwrap();
 
         let results = provider
-            .search_fulltext("u1", "User's project costs $500!", 5)
+            .search_fulltext("u1", "User's project costs $500!", 5, None)
             .await
             .unwrap();
         assert_eq!(
@@ -423,7 +545,7 @@ mod tests {
         assert_eq!(results[0].0.id, "m1");
 
         let results = provider
-            .search_fulltext("u1", "cats AND dogs OR birds NOT fish", 5)
+            .search_fulltext("u1", "cats AND dogs OR birds NOT fish", 5, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 0, "boolean keywords are literal, no crash");
@@ -443,7 +565,7 @@ mod tests {
             .unwrap();
 
         let results = provider
-            .search_fulltext("u1", "plan 🚀 Q3 launch 💡 ideas!", 5)
+            .search_fulltext("u1", "plan 🚀 Q3 launch 💡 ideas!", 5, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "emoji query is treated as literal text");
@@ -465,11 +587,14 @@ mod tests {
             .unwrap();
 
         let vector_hits = provider
-            .search_memory("u1", &[0.9, 0.1, 0.0], 10)
+            .search_memory("u1", &[0.9, 0.1, 0.0], 10, None)
             .await
             .unwrap();
         assert_eq!(vector_hits[0].0.id, "m1", "m1 is the top vector hit");
-        let fulltext_hits = provider.search_fulltext("u1", "charlie", 10).await.unwrap();
+        let fulltext_hits = provider
+            .search_fulltext("u1", "charlie", 10, None)
+            .await
+            .unwrap();
         assert_eq!(fulltext_hits[0].0.id, "m2", "full-text matches m2 only");
 
         let fused = memayu_core::fusion::fuse(&vector_hits, &fulltext_hits, 10);
@@ -486,7 +611,7 @@ mod tests {
         provider.save_memory(&m).await.unwrap();
         assert!(
             provider
-                .search_fulltext("u1", "wording", 5)
+                .search_fulltext("u1", "wording", 5, None)
                 .await
                 .unwrap()
                 .len()
@@ -502,14 +627,17 @@ mod tests {
 
         assert!(
             provider
-                .search_fulltext("u1", "wording", 5)
+                .search_fulltext("u1", "wording", 5, None)
                 .await
                 .unwrap()
                 .is_empty(),
             "stale content must be removed from the index"
         );
         assert_eq!(
-            provider.search_fulltext("u1", "phrasing", 5).await.unwrap()[0]
+            provider
+                .search_fulltext("u1", "phrasing", 5, None)
+                .await
+                .unwrap()[0]
                 .0
                 .id,
             "m1"
@@ -559,7 +687,10 @@ mod tests {
         } // drop the old-schema database and close the file
 
         let provider = LibsqlProvider::open(&path_str, 3).await.unwrap();
-        let results = provider.search_fulltext("u1", "jakarta", 5).await.unwrap();
+        let results = provider
+            .search_fulltext("u1", "jakarta", 5, None)
+            .await
+            .unwrap();
         assert_eq!(
             results.len(),
             1,
@@ -597,19 +728,28 @@ mod tests {
             .await
             .unwrap();
 
-        let work = provider.search_fulltext("u1", "work", 5).await.unwrap();
+        let work = provider
+            .search_fulltext("u1", "work", 5, None)
+            .await
+            .unwrap();
         assert!(
             work.iter().any(|(m, _)| m.id == "m1"),
             "query 'work' must match stored 'works' via the full-text leg"
         );
 
-        let run = provider.search_fulltext("u1", "run", 5).await.unwrap();
+        let run = provider
+            .search_fulltext("u1", "run", 5, None)
+            .await
+            .unwrap();
         assert!(
             run.iter().any(|(m, _)| m.id == "m2"),
             "query 'run' must match stored 'running' via the full-text leg"
         );
 
-        let prefer = provider.search_fulltext("u1", "prefer", 5).await.unwrap();
+        let prefer = provider
+            .search_fulltext("u1", "prefer", 5, None)
+            .await
+            .unwrap();
         assert!(
             prefer.iter().any(|(m, _)| m.id == "m3"),
             "query 'prefer' must match stored 'preferred' via the full-text leg"
@@ -669,7 +809,10 @@ mod tests {
         }
 
         let provider = LibsqlProvider::open(&path_str, 3).await.unwrap();
-        let results = provider.search_fulltext("u1", "work", 5).await.unwrap();
+        let results = provider
+            .search_fulltext("u1", "work", 5, None)
+            .await
+            .unwrap();
         assert_eq!(
             results.len(),
             1,
@@ -679,7 +822,10 @@ mod tests {
         drop(provider);
 
         let provider = LibsqlProvider::open(&path_str, 3).await.unwrap();
-        let results = provider.search_fulltext("u1", "work", 5).await.unwrap();
+        let results = provider
+            .search_fulltext("u1", "work", 5, None)
+            .await
+            .unwrap();
         assert_eq!(
             results.len(),
             1,
@@ -689,5 +835,183 @@ mod tests {
         drop(provider);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn mem_with_meta(
+        id: &str,
+        user_id: &str,
+        content: &str,
+        v: &[f32],
+        meta: &[(&str, &str)],
+    ) -> Memory {
+        let mut metadata = HashMap::new();
+        for (k, val) in meta {
+            metadata.insert((*k).to_string(), (*val).to_string());
+        }
+        Memory {
+            metadata,
+            ..mem(id, user_id, content, v)
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_filter_restricts_vector_search() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        provider
+            .save_memory(&mem_with_meta(
+                "m1",
+                "u1",
+                "alpha",
+                &[1.0, 0.0, 0.0],
+                &[("project", "onchain")],
+            ))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem_with_meta(
+                "m2",
+                "u1",
+                "beta",
+                &[0.0, 1.0, 0.0],
+                &[("project", "mobile")],
+            ))
+            .await
+            .unwrap();
+
+        let mut filter = HashMap::new();
+        filter.insert("project".to_string(), "onchain".to_string());
+        let results = provider
+            .search_memory("u1", &[0.9, 0.1, 0.0], 10, Some(&filter))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "filter narrows vector hits");
+        assert_eq!(results[0].0.id, "m1");
+    }
+
+    #[tokio::test]
+    async fn metadata_filter_restricts_fulltext_search() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        provider
+            .save_memory(&mem_with_meta(
+                "m1",
+                "u1",
+                "jakarta trip",
+                &[1.0, 0.0, 0.0],
+                &[("tier", "gold")],
+            ))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem_with_meta(
+                "m2",
+                "u1",
+                "jakarta trip",
+                &[0.0, 1.0, 0.0],
+                &[("tier", "silver")],
+            ))
+            .await
+            .unwrap();
+
+        let mut filter = HashMap::new();
+        filter.insert("tier".to_string(), "gold".to_string());
+        let results = provider
+            .search_fulltext("u1", "jakarta", 10, Some(&filter))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "filter narrows full-text hits");
+        assert_eq!(results[0].0.id, "m1");
+    }
+
+    #[tokio::test]
+    async fn metadata_filter_restricts_list() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        provider
+            .save_memory(&mem_with_meta(
+                "m1",
+                "u1",
+                "one",
+                &[1.0, 0.0, 0.0],
+                &[("env", "prod")],
+            ))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem_with_meta(
+                "m2",
+                "u1",
+                "two",
+                &[0.0, 1.0, 0.0],
+                &[("env", "dev")],
+            ))
+            .await
+            .unwrap();
+
+        let mut filter = HashMap::new();
+        filter.insert("env".to_string(), "prod".to_string());
+        let page = provider
+            .list_memories("u1", 10, None, Some(&filter))
+            .await
+            .unwrap();
+        assert_eq!(page.memories.len(), 1);
+        assert_eq!(page.memories[0].id, "m1");
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_paginates_with_opaque_cursor() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        for i in 0..5 {
+            let m = Memory {
+                id: format!("m{i}"),
+                created_at: Utc::now() + chrono::Duration::seconds(i),
+                updated_at: Utc::now() + chrono::Duration::seconds(i),
+                ..mem(
+                    &format!("m{i}"),
+                    "u1",
+                    &format!("note {i}"),
+                    &[1.0, 0.0, 0.0],
+                )
+            };
+            provider.save_memory(&m).await.unwrap();
+        }
+
+        let first = provider.list_memories("u1", 2, None, None).await.unwrap();
+        assert_eq!(first.memories.len(), 2, "first page holds `limit` rows");
+        let cursor = first.next_cursor.expect("more rows remain");
+        let ids_first: Vec<&str> = first.memories.iter().map(|m| m.id.as_str()).collect();
+
+        let second = provider
+            .list_memories("u1", 2, Some(&cursor), None)
+            .await
+            .unwrap();
+        assert_eq!(second.memories.len(), 2);
+        let ids_second: Vec<&str> = second.memories.iter().map(|m| m.id.as_str()).collect();
+        // Ordered created_at DESC across pages, no overlap.
+        let mut all = ids_first.clone();
+        all.extend(ids_second.iter().copied());
+        assert_eq!(all, vec!["m4", "m3", "m2", "m1"]);
+
+        let cursor2 = second.next_cursor.expect("more rows remain");
+        let third = provider
+            .list_memories("u1", 2, Some(&cursor2), None)
+            .await
+            .unwrap();
+        assert_eq!(third.memories.len(), 1);
+        assert_eq!(third.memories[0].id, "m0");
+        assert!(third.next_cursor.is_none(), "last page has no cursor");
+    }
+
+    #[tokio::test]
+    async fn list_rejects_invalid_cursor() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        provider
+            .save_memory(&mem("m1", "u1", "one", &[1.0, 0.0, 0.0]))
+            .await
+            .unwrap();
+        let err = provider
+            .list_memories("u1", 10, Some("not-a-valid-cursor"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidCursor(_)));
     }
 }

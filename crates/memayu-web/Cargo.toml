@@ -17,6 +17,7 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 mime_guess = "2"
 
 [dev-dependencies]
+async-trait = "0.1"
 memayu-storage-libsql = { path = "../memayu-storage-libsql" }
 tokio = { version = "1", features = ["macros", "rt"] }
 tower = { version = "0.5", features = ["util"] }

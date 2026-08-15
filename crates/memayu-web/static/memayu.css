@@ -180,6 +180,18 @@ body {
   justify-content: center;
 }
 
+.justify-between {
+  justify-content: space-between;
+}
+
+.justify-end {
+  justify-content: flex-end;
+}
+
+.justify-start {
+  justify-content: flex-start;
+}
+
 .shrink-0 {
   flex-shrink: 0;
 }
@@ -390,6 +402,10 @@ body {
 
 .w-24 {
   width: 6rem;
+}
+
+.w-48 {
+  width: 12rem;
 }
 
 .w-52 {
@@ -810,6 +826,10 @@ pre {
   width: 100%;
   border-collapse: collapse;
   text-align: left;
+}
+
+.table-fixed {
+  table-layout: fixed;
 }
 
 .table th,
