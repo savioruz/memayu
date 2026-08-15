@@ -1,4 +1,4 @@
 mod provider;
 mod schema;
 
-pub use provider::PostgresProvider;
+pub use provider::{PostgresProvider, PostgresStorageInfo};

@@ -295,6 +295,16 @@ impl MemoryService {
         self.storage.save_memory(&mem).await?;
         Ok(mem)
     }
+
+    pub async fn get_memory(&self, memory_id: &str) -> Result<Memory, CoreError> {
+        self.storage.get_memory(memory_id).await.map_err(|e| {
+            if matches!(e, StorageError::Other(ref s) if s.contains("not found")) {
+                CoreError::NotFound(format!("memory {memory_id} not found"))
+            } else {
+                CoreError::from(e)
+            }
+        })
+    }
 }
 
 fn validate_limit(limit: usize) -> Result<(), CoreError> {

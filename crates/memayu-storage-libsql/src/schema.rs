@@ -149,6 +149,29 @@ fn parse_dim_from_ddl(sql: &str) -> Option<usize> {
     rest[..end].trim().parse().ok()
 }
 
+/// Read the stored embedding dimension from an existing `memories` table
+/// without creating the schema. Returns `None` if the table does not exist.
+pub async fn stored_dimension(conn: &Connection) -> Result<Option<usize>, StorageError> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories'",
+            (),
+        )
+        .await
+        .map_err(|e| StorageError::Other(format!("query schema: {e}")))?;
+    if let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StorageError::Other(format!("read schema row: {e}")))?
+    {
+        let sql: String = row
+            .get(0)
+            .map_err(|e| StorageError::Other(format!("read schema sql: {e}")))?;
+        return Ok(parse_dim_from_ddl(&sql));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
