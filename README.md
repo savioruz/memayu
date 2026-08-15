@@ -14,7 +14,10 @@
 - **Ships as a single static binary.** Written in Rust, no runtime dependencies. Runs comfortably on a $5 VPS or a Raspberry Pi.
 - **Auto-detects embedding dimension mismatches.** No more `expected 1536, got 768` debugging sessions. Memayu probes your embedder on startup and configures itself.
 - **ADD vs UPDATE extraction.** New facts replace conflicting old facts automatically — your agent's memory stays a coherent knowledge base, not a growing append-only log.
-- **Raw mode.** Set `MEMAYU_EXTRACTION_MODE=raw` to skip LLM extraction and store memories verbatim, with aggressive (0.98) deduplication — ideal for notes, logs, and low-latency ingestion.
+- **Raw mode.** Set `MEMAYU_EXTRACTION_MODE=raw` (or `behavior.extraction_mode = "raw"` in the config file) to skip LLM extraction and store memories verbatim, with aggressive (0.98) deduplication — ideal for notes, logs, and low-latency ingestion.
+- **Hybrid search.** Vector similarity fused with full-text retrieval (libSQL FTS5 / Postgres tsvector) via Reciprocal Rank Fusion (RRF), so exact keyword matches and semantic matches both surface.
+- **`memayu doctor`.** Built-in diagnostics for self-hosted troubleshooting — validates config, storage, LLM, and embedder connectivity in one command.
+- **Non-interactive CLI.** `memayu add`, `memayu search`, `memayu list`, and `memayu delete` work in-process for scripting without a server.
 
 ## Quick Start
 
@@ -168,7 +171,7 @@ Memayu follows a ports-and-adapters architecture with a strict dependency rule: 
 
 ## Configuration
 
-All configuration is via environment variables (prefixed `MEMAYU_`). See **[.env.example](.env.example)** for the complete reference with defaults and descriptions.
+Configuration loads from an optional TOML file at `~/.config/memayu/config.toml` (or `$XDG_CONFIG_HOME/memayu/config.toml`), overridable via the `MEMAYU_CONFIG` env var. Environment variables (prefixed `MEMAYU_`) remain supported and override the file. See **[.env.example](.env.example)** for the complete reference with defaults and descriptions.
 
 ## Contributing
 

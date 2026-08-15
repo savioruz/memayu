@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "memayu"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "axum",
  "console",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-api"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-config"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "dirs",
  "indoc",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-core"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "async-trait",
  "base64",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-identity"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "chrono",
  "hex",
@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-llm-client"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "async-trait",
  "http-body-util",
@@ -1727,7 +1727,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-mcp"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1741,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-storage-libsql"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1755,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-storage-postgres"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "memayu-web"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 dependencies = [
  "async-trait",
  "axum",
