@@ -49,6 +49,7 @@ fn test_storage_config() -> StorageConfig {
 
 fn test_provider(name: &str) -> memayu_config::ProviderConfig {
     memayu_config::ProviderConfig {
+        backend: memayu_config::EmbedderBackend::Http,
         base_url: format!("http://127.0.0.1/{name}"),
         api_key: Some(format!("key-{name}")),
         model: format!("model-{name}"),

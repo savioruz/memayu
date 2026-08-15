@@ -3,7 +3,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::Router;
     use memayu_api::{build_api_router, open_db, ConfigRegistry};
-    use memayu_config::{ProviderConfig, StorageBackend, StorageConfig};
+    use memayu_config::{EmbedderBackend, ProviderConfig, StorageBackend, StorageConfig};
     use memayu_core::{
         EmbedError, EmbedderProvider, ExtractionDecision, ExtractionResult, LlmError, LlmProvider,
         MemoryPage, Message, MetadataFilter, StorageError, StorageProvider,
@@ -163,6 +163,7 @@ mod tests {
 
     fn test_config() -> ProviderConfig {
         ProviderConfig {
+            backend: EmbedderBackend::Http,
             base_url: "http://localhost:11434".into(),
             api_key: None,
             model: "test-model".into(),

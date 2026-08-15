@@ -4,8 +4,8 @@
 //! not pull in the Axum web stack.
 
 use memayu_config::{Config, StorageBackend};
-use memayu_core::{EmbedderProvider, MemoryService, StorageProvider};
-use memayu_llm_client::{HttpEmbedderProvider, HttpLlmProvider};
+use memayu_core::{MemoryService, StorageProvider};
+use memayu_llm_client::{build_embedder, HttpLlmProvider};
 use std::sync::Arc;
 
 /// Probe the embedder for its output dimension unless explicitly configured.
@@ -16,7 +16,7 @@ async fn detect_dimension(config: &Config) -> Result<usize, Box<dyn std::error::
     if let Some(dim) = config.dimension {
         return Ok(dim);
     }
-    let embedder = HttpEmbedderProvider::new(config.embedder.clone());
+    let embedder = build_embedder(&config.embedder);
     Ok(embedder.embed("dimension probe").await?.len())
 }
 
@@ -57,7 +57,7 @@ pub async fn build_service(
     let service = Arc::new(
         MemoryService::new(
             storage,
-            Arc::new(HttpEmbedderProvider::new(config.embedder.clone())),
+            build_embedder(&config.embedder),
             Arc::new(HttpLlmProvider::new(config.llm.clone())),
         )
         .with_extraction_mode(config.extraction_mode),

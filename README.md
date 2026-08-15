@@ -13,6 +13,7 @@
 - **Self-hosted, free forever.** No license gating, no per-seat pricing. BYOK (bring your own keys) for LLM and embedding providers — you own your data end to end.
 - **Ships as a single static binary.** Written in Rust, no runtime dependencies. Runs comfortably on a $5 VPS or a Raspberry Pi.
 - **Auto-detects embedding dimension mismatches.** No more `expected 1536, got 768` debugging sessions. Memayu probes your embedder on startup and configures itself.
+- **Local embedding (no API key).** An in-process Candle backend runs a multilingual model fully on-device with zero network calls at inference time — a pure-Rust single-binary alternative to BYOK, ideal for Raspberry Pi and offline VPS setups. The default model is `paraphrase-multilingual-MiniLM-L12-v2` (384-d, covers Bahasa Indonesia + English).
 - **ADD vs UPDATE extraction.** New facts replace conflicting old facts automatically — your agent's memory stays a coherent knowledge base, not a growing append-only log.
 - **Raw mode.** Set `MEMAYU_EXTRACTION_MODE=raw` (or `behavior.extraction_mode = "raw"` in the config file) to skip LLM extraction and store memories verbatim, with aggressive (0.98) deduplication — ideal for notes, logs, and low-latency ingestion.
 - **Hybrid search.** Vector similarity fused with full-text retrieval (libSQL FTS5 / Postgres tsvector) via Reciprocal Rank Fusion (RRF), so exact keyword matches and semantic matches both surface.
@@ -172,6 +173,25 @@ Memayu follows a ports-and-adapters architecture with a strict dependency rule: 
 ## Configuration
 
 Configuration loads from an optional TOML file at `~/.config/memayu/config.toml` (or `$XDG_CONFIG_HOME/memayu/config.toml`), overridable via the `MEMAYU_CONFIG` env var. Environment variables (prefixed `MEMAYU_`) remain supported and override the file. See **[.env.example](.env.example)** for the complete reference with defaults and descriptions.
+
+### Local embedding (no API key)
+
+The embedder can run fully on-device instead of calling a remote API. Set the embedder backend to `local` in the config file:
+
+```toml
+[embedder]
+backend = "local"               # "local" (on-device Candle) or "http" (BYOK, default)
+model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+```
+
+or via environment variables: `MEMAYU_EMBEDDER_BACKEND=local` and `MEMAYU_EMBEDDER_MODEL=<HF model id>`.
+
+- **No API key.** A local backend needs no `base_url` or `api_key`; nothing is sent over the network at inference time.
+- **One-time download.** The model weights are downloaded from Hugging Face on first use and cached under the local data directory (override with `MEMAYU_MODEL_DIR`). Subsequent runs are fully offline.
+- **Default model.** `paraphrase-multilingual-MiniLM-L12-v2` (384-d) is multilingual, so it handles a Bahasa Indonesia + English technical mix out of the box — measured recall@3 of 5/5 (100%) on a fixed mixed corpus in the local e2e suite. `all-MiniLM-L6-v2` or another HF sentence-transformer id can be substituted for English-only users.
+- **Dimension auto-detect.** The local model's output dimension is probed the same way as remote providers, so no manual dimension config is needed.
+- **Wizard & dashboard.** `memayu setup` offers `local` as the default embedder backend, and the web dashboard (`/providers`) exposes a backend selector. `memayu doctor` reports the active backend and skips HTTP probes when the backend is local.
+- **Build.** The Candle backend is compiled in by default (`memayu-llm-client`'s `local-embedding` feature). Use `--no-default-features` on that crate for a smaller HTTP-only build.
 
 ## Contributing
 

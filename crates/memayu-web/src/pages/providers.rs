@@ -5,13 +5,38 @@ use axum::http::StatusCode;
 use axum::response::Html;
 use axum::Form;
 use memayu_api::{ConfigRegistry, WebServices};
-use memayu_config::ProviderConfig;
-use memayu_core::EmbedderProvider;
+use memayu_config::{EmbedderBackend, ProviderConfig};
 use serde::Deserialize;
 
-fn provider_card(kind: &str, title: &str, cfg: &ProviderConfig, has_key: bool) -> maud::Markup {
+fn provider_card(
+    kind: &str,
+    title: &str,
+    cfg: &ProviderConfig,
+    has_key: bool,
+    show_backend: bool,
+) -> maud::Markup {
     let key_hint = if has_key {
         maud::html! { p class="text-xs text-base-content/50 mt-1" { "API key is saved. Leave blank to keep it." } }
+    } else {
+        maud::html! {}
+    };
+    let backend_field = if show_backend {
+        maud::html! {
+            fieldset class="fieldset" {
+                label class="label" { span { "Backend" } }
+                select name="backend" class="select w-full" {
+                    option value="http" selected=(cfg.backend == EmbedderBackend::Http) {
+                        "HTTP (remote OpenAI-compatible API)"
+                    }
+                    option value="local" selected=(cfg.backend == EmbedderBackend::Local) {
+                        "Local (in-process Candle model, no API key)"
+                    }
+                }
+                p class="text-xs text-base-content/50 mt-1" {
+                    "Base URL and API key are only used by the HTTP backend. The local backend runs the model on-device; \'model\' is the Hugging Face model id."
+                }
+            }
+        }
     } else {
         maud::html! {}
     };
@@ -21,11 +46,12 @@ fn provider_card(kind: &str, title: &str, cfg: &ProviderConfig, has_key: bool) -
                 h3 class="card-title text-lg" { (title) }
                 form method="post" action="/providers" class="space-y-4 mt-2" {
                     input type="hidden" name="provider" value=(kind);
+                    (backend_field)
                     fieldset class="fieldset" {
                         label class="label" { span { "Base URL" } }
                         input type="url" name="base_url"
                             class="input w-full"
-                            value=(cfg.base_url.as_str()) required;
+                            value=(cfg.base_url.as_str());
                     }
                     fieldset class="fieldset" {
                         label class="label" { span { "API Key" } }
@@ -58,8 +84,8 @@ pub async fn get_providers(
     let emb_has_key = embedder.api_key.as_deref().is_some_and(|k| !k.is_empty());
     let body = maud::html! {
         div class="grid grid-cols-1 md:grid-cols-2 gap-6" {
-            (provider_card("llm", "LLM (extraction)", &llm, llm_has_key))
-            (provider_card("embedder", "Embedder", &embedder, emb_has_key))
+            (provider_card("llm", "LLM (extraction)", &llm, llm_has_key, false))
+            (provider_card("embedder", "Embedder", &embedder, emb_has_key, true))
         }
     };
     Ok(Html(components::render_page(
@@ -74,6 +100,7 @@ pub async fn get_providers(
 #[derive(Debug, Deserialize)]
 pub struct ProviderForm {
     pub provider: String,
+    pub backend: Option<String>,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -100,7 +127,19 @@ pub async fn post_providers(
         Some(api_key.clone())
     };
 
+    // The embedder backend lives in the config file (authoritative). A DB save
+    // must not clobber it: fall back to the current registry backend unless the
+    // form explicitly picked one. The LLM is always HTTP.
+    let backend = match form.provider.as_str() {
+        "embedder" => form
+            .backend
+            .as_deref()
+            .and_then(|b| b.parse().ok())
+            .unwrap_or_else(|| registry.embedder().backend),
+        _ => EmbedderBackend::Http,
+    };
     let new_config = ProviderConfig {
+        backend,
         base_url: form.base_url.clone(),
         api_key: api_key_for_config,
         model: form.model.clone(),
@@ -109,7 +148,7 @@ pub async fn post_providers(
     let probe = match form.provider.as_str() {
         "llm" => None,
         "embedder" => {
-            let provider = memayu_llm_client::HttpEmbedderProvider::new(new_config.clone());
+            let provider = memayu_llm_client::build_embedder(&new_config);
             match provider.embed("dimension probe").await {
                 Ok(v) => Some(Ok(v.len())),
                 Err(e) => Some(Err(format!("{}", e))),
@@ -157,8 +196,8 @@ pub async fn post_providers(
             }
         }
         div class="grid grid-cols-1 md:grid-cols-2 gap-6" {
-            (provider_card("llm", "LLM (extraction)", &llm, llm_has_key))
-            (provider_card("embedder", "Embedder", &embedder, emb_has_key))
+            (provider_card("llm", "LLM (extraction)", &llm, llm_has_key, false))
+            (provider_card("embedder", "Embedder", &embedder, emb_has_key, true))
         }
     };
     Ok(Html(components::render_page(

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use memayu_config::ProviderConfig;
+use memayu_config::{EmbedderBackend, ProviderConfig};
 use memayu_core::{EmbedError, EmbedderProvider, ExtractionResult, LlmError, LlmProvider, Message};
-use memayu_llm_client::{HttpEmbedderProvider, HttpLlmProvider};
+use memayu_llm_client::HttpLlmProvider;
 use std::sync::{Arc, RwLock};
 
 /// Shared, mutable provider configuration. Written on dashboard save, read per call.
@@ -45,8 +45,17 @@ pub async fn load_registry(
 ) -> Result<ConfigRegistry, String> {
     let mut llm = fallback_llm;
     let mut embedder = fallback_embedder;
+    let fallback_emb_backend = embedder.backend;
     for (provider, (base_url, api_key, model)) in db.provider_configs().await? {
         let cfg = ProviderConfig {
+            // A DB row stores only the HTTP triple; keep the config-selected
+            // backend (e.g. local Candle) for the embedder so a config-driven
+            // local install survives DB rows. The LLM is always HTTP.
+            backend: if provider == "embedder" {
+                fallback_emb_backend
+            } else {
+                EmbedderBackend::Http
+            },
             base_url,
             api_key: Some(api_key),
             model,
@@ -91,8 +100,8 @@ impl EmbedderConfigProvider {
         Self { registry }
     }
 
-    fn fresh(&self) -> HttpEmbedderProvider {
-        HttpEmbedderProvider::new(self.registry.embedder())
+    fn fresh(&self) -> Arc<dyn EmbedderProvider> {
+        memayu_llm_client::build_embedder(&self.registry.embedder())
     }
 }
 
