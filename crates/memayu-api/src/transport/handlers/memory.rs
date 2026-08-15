@@ -1,6 +1,6 @@
 /// Axum handlers for memory routes — thin wrappers that delegate to
 /// the core MemoryService.
-use crate::error::{ApiError, ApiErrorBody};
+use crate::error::{ApiError, ApiErrorBody, ApiResult};
 use crate::modules::memory::dto::{
     AddMemoryRequest, AddMemoryResponse, ListMemoryResponse, ListQuery, ListedMemory,
     SearchMemoryRequest, SearchMemoryResponse, SearchResult, UpdateMemoryRequest,
@@ -18,7 +18,7 @@ use memayu_core::MetadataFilter;
     path = "/api/memories/add",
     request_body = AddMemoryRequest,
     responses(
-        (status = 200, description = "Memory added successfully", body = AddMemoryResponse),
+        (status = 200, description = "Memory added successfully", body = ApiResult<AddMemoryResponse>),
         (status = 400, description = "Bad request", body = ApiErrorBody),
     )
 )]
@@ -26,7 +26,7 @@ pub async fn add_memory(
     State(state): State<ApiState>,
     _account: AccountId,
     Json(req): Json<AddMemoryRequest>,
-) -> Result<(StatusCode, Json<AddMemoryResponse>), ApiError> {
+) -> Result<(StatusCode, Json<ApiResult<AddMemoryResponse>>), ApiError> {
     let user_id = &_account.0;
     if req.content.trim().is_empty() {
         return Err(ApiError::bad_request("content is required"));
@@ -38,11 +38,13 @@ pub async fn add_memory(
         .await?;
     Ok((
         StatusCode::OK,
-        Json(AddMemoryResponse {
-            status: "success".into(),
-            memory_id: mem.id,
-            dimension: mem.vector.len(),
-            metadata: mem.metadata,
+        Json(ApiResult {
+            result: AddMemoryResponse {
+                status: "success".into(),
+                memory_id: mem.id,
+                dimension: mem.vector.len(),
+                metadata: mem.metadata,
+            },
         }),
     ))
 }
@@ -53,7 +55,7 @@ pub async fn add_memory(
     path = "/api/memories/search",
     request_body = SearchMemoryRequest,
     responses(
-        (status = 200, description = "Search results", body = SearchMemoryResponse),
+        (status = 200, description = "Search results", body = ApiResult<SearchMemoryResponse>),
         (status = 400, description = "Bad request", body = ApiErrorBody),
     )
 )]
@@ -61,7 +63,7 @@ pub async fn search_memory(
     State(state): State<ApiState>,
     _account: AccountId,
     Json(req): Json<SearchMemoryRequest>,
-) -> Result<Json<SearchMemoryResponse>, ApiError> {
+) -> Result<Json<ApiResult<SearchMemoryResponse>>, ApiError> {
     let user_id = &_account.0;
     if req.query.trim().is_empty() {
         return Err(ApiError::bad_request("query is required"));
@@ -74,17 +76,19 @@ pub async fn search_memory(
         .service
         .search_memory_filtered(user_id, &req.query, req.limit, req.metadata_filter.as_ref())
         .await?;
-    Ok(Json(SearchMemoryResponse {
-        results: results
-            .into_iter()
-            .map(|(m, score)| SearchResult {
-                memory_id: m.id,
-                content: m.content,
-                score,
-                metadata: m.metadata,
-                created_at: m.created_at,
-            })
-            .collect(),
+    Ok(Json(ApiResult {
+        result: SearchMemoryResponse {
+            memories: results
+                .into_iter()
+                .map(|(m, score)| SearchResult {
+                    memory_id: m.id,
+                    content: m.content,
+                    score,
+                    metadata: m.metadata,
+                    created_at: m.created_at,
+                })
+                .collect(),
+        },
     }))
 }
 
@@ -93,12 +97,12 @@ pub async fn search_memory(
     get,
     path = "/api/memories/list",
     params(
-        ("limit" = Option<usize>, Query, description = "Max results (default 100)"),
+        ("limit" = Option<usize>, Query, description = "Max results (default 50, hard max 100)"),
         ("cursor" = Option<String>, Query, description = "Opaque cursor for the next page"),
         ("metadata_filter" = Option<MetadataFilter>, Query, description = "Exact metadata key=value predicates"),
     ),
     responses(
-        (status = 200, description = "List of memories", body = ListMemoryResponse),
+        (status = 200, description = "List of memories", body = ApiResult<ListMemoryResponse>),
         (status = 400, description = "Bad request", body = ApiErrorBody),
     )
 )]
@@ -106,26 +110,29 @@ pub async fn list_memories(
     State(state): State<ApiState>,
     _account: AccountId,
     Query(q): Query<ListQuery>,
-) -> Result<Json<ListMemoryResponse>, ApiError> {
+) -> Result<Json<ApiResult<ListMemoryResponse>>, ApiError> {
     let user_id = &_account.0;
     let filter = (!q.metadata_filter.0.is_empty()).then_some(&q.metadata_filter.0);
     let page = state
         .service
         .list_memories_paged(user_id, q.limit, q.cursor.as_deref(), filter)
         .await?;
-    Ok(Json(ListMemoryResponse {
-        next_cursor: page.next_cursor,
-        memories: page
-            .memories
-            .into_iter()
-            .map(|m| ListedMemory {
-                memory_id: m.id,
-                content: m.content,
-                metadata: m.metadata,
-                created_at: m.created_at,
-                updated_at: m.updated_at,
-            })
-            .collect(),
+    Ok(Json(ApiResult {
+        result: ListMemoryResponse {
+            next_cursor: page.next_cursor,
+            total_data: page.total,
+            memories: page
+                .memories
+                .into_iter()
+                .map(|m| ListedMemory {
+                    memory_id: m.id,
+                    content: m.content,
+                    metadata: m.metadata,
+                    created_at: m.created_at,
+                    updated_at: m.updated_at,
+                })
+                .collect(),
+        },
     }))
 }
 
@@ -159,7 +166,7 @@ pub async fn delete_memory(
     ),
     request_body = UpdateMemoryRequest,
     responses(
-        (status = 200, description = "Memory updated", body = UpdateMemoryResponse),
+        (status = 200, description = "Memory updated", body = ApiResult<UpdateMemoryResponse>),
         (status = 400, description = "Bad request", body = ApiErrorBody),
         (status = 404, description = "Memory not found", body = ApiErrorBody),
     )
@@ -169,15 +176,17 @@ pub async fn update_memory(
     _account: AccountId,
     Path(id): Path<String>,
     Json(req): Json<UpdateMemoryRequest>,
-) -> Result<Json<UpdateMemoryResponse>, ApiError> {
+) -> Result<Json<ApiResult<UpdateMemoryResponse>>, ApiError> {
     if req.content.trim().is_empty() {
         return Err(ApiError::bad_request("content is required"));
     }
     let mem = state.service.update_memory(&id, &req.content).await?;
-    Ok(Json(UpdateMemoryResponse {
-        status: "success".into(),
-        memory_id: mem.id,
-        content: mem.content,
-        metadata: mem.metadata,
+    Ok(Json(ApiResult {
+        result: UpdateMemoryResponse {
+            status: "success".into(),
+            memory_id: mem.id,
+            content: mem.content,
+            metadata: mem.metadata,
+        },
     }))
 }

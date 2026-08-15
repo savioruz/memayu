@@ -229,6 +229,9 @@ impl StorageProvider for LibsqlProvider {
             sql.push_str(&metadata_filter_clause(f));
             push_metadata_params(&mut params, f);
         }
+        // Total count of rows matching user + filter (cursor is windowing-only
+        // and must not affect the total).
+        let total = self.count_total(user_id, filter).await?;
         if let Some(c) = cursor {
             let (ts, id) = decode_cursor(c).ok_or_else(|| {
                 StorageError::InvalidCursor("invalid pagination cursor".to_string())
@@ -267,7 +270,7 @@ impl StorageProvider for LibsqlProvider {
         } else {
             None
         };
-        Ok(MemoryPage::new(out, next_cursor))
+        Ok(MemoryPage::new(out, next_cursor, total))
     }
 
     async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
@@ -301,6 +304,37 @@ impl StorageProvider for LibsqlProvider {
 }
 
 impl LibsqlProvider {
+    /// Count all memories for a user matching the optional metadata filter,
+    /// regardless of pagination window.
+    async fn count_total(
+        &self,
+        user_id: &str,
+        filter: Option<&MetadataFilter>,
+    ) -> Result<usize, StorageError> {
+        let mut sql = String::from("SELECT COUNT(*) FROM memories WHERE user_id = ?1");
+        let mut params: Vec<libsql::Value> = vec![user_id.into()];
+        if let Some(f) = filter {
+            sql.push_str(&metadata_filter_clause(f));
+            push_metadata_params(&mut params, f);
+        }
+        let mut rows = self
+            .conn
+            .query(&sql, params)
+            .await
+            .map_err(|e| StorageError::Other(format!("count memories: {e}")))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| StorageError::Other(format!("iterate count: {e}")))?
+        {
+            Some(row) => row
+                .get::<i64>(0)
+                .map(|n| n as usize)
+                .map_err(|e| StorageError::Other(format!("read count: {e}"))),
+            None => Ok(0),
+        }
+    }
+
     /// Keep the FTS5 index in lockstep with `memories`. Delete-then-insert is
     /// idempotent for both INSERT and UPDATE paths, so a single helper covers
     /// both (issue #20).

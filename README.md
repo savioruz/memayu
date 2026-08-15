@@ -70,7 +70,7 @@ curl -X POST http://localhost:8080/api/memories/add \
   -d '{"content": "User lives in Jakarta", "metadata": {}}'
 
 # Response
-# {"status": "success", "memory_id": "abc123...", "dimension": 1536}
+# {"result": {"status": "success", "memory_id": "abc123...", "dimension": 1536}}
 
 # Search memories by semantic similarity
 curl -X POST http://localhost:8080/api/memories/search \
@@ -79,13 +79,16 @@ curl -X POST http://localhost:8080/api/memories/search \
   -d '{"query": "where does the user live", "limit": 5}'
 
 # Response
-# {"results": [
+# {"result": {"memories": [
 #   {"memory_id": "abc...", "content": "User lives in Jakarta", "score": 0.92, "created_at": "2026-..."}
-# ]}
+# ]}}
 
-# List all memories
+# List all memories (limit defaults to 50, hard max 100)
 curl 'http://localhost:8080/api/memories/list?limit=50' \
   -H 'x-api-key: YOUR_API_KEY'
+
+# Response
+# {"result": {"memories": [...], "next_cursor": "abc..." | null, "total_data": 42}}
 
 # Delete a memory
 curl -X DELETE 'http://localhost:8080/api/memories/{id}' \

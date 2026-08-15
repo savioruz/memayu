@@ -33,7 +33,7 @@ fn default_limit() -> usize {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SearchMemoryResponse {
-    pub results: Vec<SearchResult>,
+    pub memories: Vec<SearchResult>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -47,7 +47,10 @@ pub struct SearchResult {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ListQuery {
+    /// Maximum number of memories to return. Defaults to 50. Hard maximum is
+    /// 100; larger values are rejected with HTTP 400.
     #[serde(default = "default_list_limit")]
+    #[schema(default = 50, maximum = 100)]
     pub limit: usize,
     #[serde(default)]
     pub cursor: Option<String>,
@@ -78,13 +81,17 @@ impl<'de> serde::Deserialize<'de> for MetadataFilterQuery {
 }
 
 fn default_list_limit() -> usize {
-    100
+    50
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListMemoryResponse {
     pub memories: Vec<ListedMemory>,
+    /// Opaque cursor for the next page, or `null` when this is the last page.
     pub next_cursor: Option<String>,
+    /// Total number of memories matching the current filter, independent of
+    /// the current page window.
+    pub total_data: usize,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

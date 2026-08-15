@@ -389,17 +389,17 @@ mod tests {
             _cursor: Option<&str>,
             filter: Option<&MetadataFilter>,
         ) -> Result<MemoryPage, StorageError> {
-            Ok(MemoryPage::new(
-                self.rows
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|m| filter.is_none_or(|f| metadata_matches(&m.metadata, f)))
-                    .take(limit)
-                    .cloned()
-                    .collect(),
-                None,
-            ))
+            let filtered: Vec<Memory> = self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| filter.is_none_or(|f| metadata_matches(&m.metadata, f)))
+                .cloned()
+                .collect();
+            let total = filtered.len();
+            let page = filtered.into_iter().take(limit).collect();
+            Ok(MemoryPage::new(page, None, total))
         }
         async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
             self.rows
@@ -928,7 +928,7 @@ mod tests {
             _cursor: Option<&str>,
             _filter: Option<&MetadataFilter>,
         ) -> Result<MemoryPage, StorageError> {
-            Ok(MemoryPage::new(vec![], None))
+            Ok(MemoryPage::new(vec![], None, 0))
         }
         async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
             Err(StorageError::Other(format!("memory {memory_id} not found")))

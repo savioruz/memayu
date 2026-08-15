@@ -254,6 +254,20 @@ impl StorageProvider for PostgresProvider {
             where_clause.push_str(&format!(" AND metadata @> ${param_idx}::jsonb"));
             param_idx += 1;
         }
+        // Total count of rows matching user + filter (cursor is windowing-only
+        // and must not affect the total).
+        let total = {
+            let sql_count = format!("SELECT COUNT(*) FROM memories WHERE {where_clause}");
+            let mut q = sqlx::query_as::<_, (i64,)>(&sql_count).bind(user_id);
+            if let Some(v) = filter_value.clone() {
+                q = q.bind(v);
+            }
+            let (count,): (i64,) = q
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| StorageError::Other(format!("count memories: {e}")))?;
+            count as usize
+        };
         let mut cursor_value: Option<(chrono::DateTime<Utc>, uuid::Uuid)> = None;
         if let Some(c) = cursor {
             let (ts, id) = decode_cursor(c).ok_or_else(|| {
@@ -298,7 +312,7 @@ impl StorageProvider for PostgresProvider {
         } else {
             None
         };
-        Ok(MemoryPage::new(out, next_cursor))
+        Ok(MemoryPage::new(out, next_cursor, total))
     }
 
     async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {

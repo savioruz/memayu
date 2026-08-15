@@ -108,6 +108,7 @@ mod tests {
                     .cmp(&a.created_at)
                     .then_with(|| b.id.cmp(&a.id))
             });
+            let total = rows.len();
             if let Some(c) = cursor {
                 let (ts, id) = decode_cursor(c)
                     .ok_or_else(|| StorageError::InvalidCursor("invalid cursor".to_string()))?;
@@ -121,7 +122,7 @@ mod tests {
             } else {
                 None
             };
-            Ok(MemoryPage::new(rows, next_cursor))
+            Ok(MemoryPage::new(rows, next_cursor, total))
         }
         async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
             self.rows
@@ -239,6 +240,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["dimension"], 3);
         assert_eq!(parsed["metadata"]["source"], "test");
@@ -269,6 +271,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         // add response echoes metadata
         assert_eq!(parsed["metadata"]["source"], "telegram");
         assert_eq!(parsed["metadata"]["tag"], "location");
@@ -291,7 +294,8 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let results = parsed["results"].as_array().unwrap();
+        let parsed = parsed["result"].clone();
+        let results = parsed["memories"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["metadata"]["source"], "telegram");
         assert_eq!(results[0]["metadata"]["tag"], "location");
@@ -312,6 +316,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         let memories = parsed["memories"].as_array().unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0]["metadata"]["source"], "telegram");
@@ -373,8 +378,9 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(!parsed["results"].as_array().unwrap().is_empty());
-        assert!(parsed["results"][0]["score"].is_number());
+        let parsed = parsed["result"].clone();
+        assert!(!parsed["memories"].as_array().unwrap().is_empty());
+        assert!(parsed["memories"][0]["score"].is_number());
     }
 
     #[tokio::test]
@@ -399,6 +405,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         let memory_id = parsed["memory_id"].as_str().unwrap();
 
         // List memories
@@ -418,6 +425,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         assert_eq!(parsed["memories"].as_array().unwrap().len(), 1);
 
         // Delete the memory
@@ -457,6 +465,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         let memory_id = parsed["memory_id"].as_str().unwrap();
 
         // Update it
@@ -478,6 +487,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["memory_id"], memory_id);
         assert_eq!(parsed["content"], "User moved to Bandung");
@@ -497,6 +507,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         let memories = parsed["memories"].as_array().unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0]["content"], "User moved to Bandung");
@@ -562,6 +573,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         parsed["memory_id"].as_str().unwrap().to_string()
     }
 
@@ -597,7 +609,8 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let results = parsed["results"].as_array().unwrap();
+        let parsed = parsed["result"].clone();
+        let results = parsed["memories"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["metadata"]["source"], "cli");
     }
@@ -630,6 +643,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         let memories = parsed["memories"].as_array().unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0]["metadata"]["source"], "telegram");
@@ -658,6 +672,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         let page1 = parsed["memories"].as_array().unwrap();
         let tags1: Vec<&str> = page1
             .iter()
@@ -684,6 +699,7 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
         let page2 = parsed["memories"].as_array().unwrap();
         let tags2: Vec<&str> = page2
             .iter()
@@ -711,6 +727,57 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/memories/list?limit=10&cursor=not-a-valid-cursor")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_defaults_to_50_when_limit_omitted() {
+        let (app, cookie) = setup_and_login().await;
+        // MockLlm always decides `Add`, so each POST creates a distinct row.
+        for i in 0..55 {
+            add_memory_with_meta(
+                &app,
+                &cookie,
+                &format!("mem {i}"),
+                &format!(r#"{{"i":"{i}"}}"#),
+            )
+            .await;
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memories/list")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
+        // Omitted limit defaults to 50, not the full 55.
+        assert_eq!(parsed["memories"].as_array().unwrap().len(), 50);
+        assert_eq!(parsed["total_data"], 55);
+        assert!(parsed["next_cursor"].is_string());
+    }
+
+    #[tokio::test]
+    async fn list_rejects_over_max_limit_with_400() {
+        let (app, cookie) = setup_and_login().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memories/list?limit=101")
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),

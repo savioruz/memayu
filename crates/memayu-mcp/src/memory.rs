@@ -17,6 +17,12 @@ impl From<memayu_core::CoreError> for McpError {
     }
 }
 
+/// API responses are wrapped in a `{ "result": <body> }` envelope.
+#[derive(serde::Deserialize)]
+struct Envelope<T> {
+    result: T,
+}
+
 /// Abstract backend — implemented by in-process `MemoryService` or a remote HTTP client.
 #[async_trait]
 pub trait MemoryBackend: Send + Sync {
@@ -83,12 +89,12 @@ impl MemoryBackend for Backend {
                 struct R {
                     memory_id: String,
                 }
-                let data: R = resp
+                let data: Envelope<R> = resp
                     .json()
                     .await
                     .map_err(|e| McpError::Api(e.to_string()))?;
                 Ok(Memory {
-                    id: data.memory_id,
+                    id: data.result.memory_id,
                     user_id: user_id.into(),
                     content: content.into(),
                     vector: vec![],
@@ -137,7 +143,7 @@ impl MemoryBackend for Backend {
                 }
                 #[derive(serde::Deserialize)]
                 struct R {
-                    results: Vec<Ri>,
+                    memories: Vec<Ri>,
                 }
                 #[derive(serde::Deserialize)]
                 struct Ri {
@@ -147,12 +153,13 @@ impl MemoryBackend for Backend {
                     #[serde(default)]
                     created_at: Option<chrono::DateTime<Utc>>,
                 }
-                let data: R = resp
+                let data: Envelope<R> = resp
                     .json()
                     .await
                     .map_err(|e| McpError::Api(e.to_string()))?;
                 Ok(data
-                    .results
+                    .result
+                    .memories
                     .into_iter()
                     .map(|r| {
                         (
@@ -209,11 +216,12 @@ impl MemoryBackend for Backend {
                     created_at: chrono::DateTime<Utc>,
                     updated_at: chrono::DateTime<Utc>,
                 }
-                let data: R = resp
+                let data: Envelope<R> = resp
                     .json()
                     .await
                     .map_err(|e| McpError::Api(e.to_string()))?;
                 Ok(data
+                    .result
                     .memories
                     .into_iter()
                     .map(|m| Memory {
@@ -290,14 +298,14 @@ impl MemoryBackend for Backend {
                     memory_id: String,
                     content: String,
                 }
-                let data: R = resp
+                let data: Envelope<R> = resp
                     .json()
                     .await
                     .map_err(|e| McpError::Api(e.to_string()))?;
                 Ok(Memory {
-                    id: data.memory_id,
+                    id: data.result.memory_id,
                     user_id: String::new(),
-                    content: data.content,
+                    content: data.result.content,
                     vector: vec![],
                     metadata: HashMap::new(),
                     created_at: Utc::now(),

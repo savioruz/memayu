@@ -1,26 +1,37 @@
 use crate::auth::CurrentUser;
 use crate::components;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Html;
 use axum::Form;
-use memayu_api::MemoryService;
+use memayu_core::{MemoryPage, MemoryService};
 use std::sync::Arc;
+
+/// Number of memories shown per page in the dashboard.
+const LIST_PAGE_SIZE: usize = 10;
 
 #[derive(serde::Deserialize)]
 pub struct SearchForm {
     pub query: String,
 }
 
+#[derive(serde::Deserialize)]
+pub struct ListCursorQuery {
+    pub cursor: Option<String>,
+}
+
 pub async fn get_home(
     user: CurrentUser,
     State(service): State<Arc<MemoryService>>,
 ) -> Result<Html<String>, (axum::http::StatusCode, String)> {
-    let memories = service.list_memories(&user.id, 100).await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{}", e),
-        )
-    })?;
+    let page = service
+        .list_memories_paged(&user.id, LIST_PAGE_SIZE, None, None)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{}", e),
+            )
+        })?;
 
     Ok(Html(components::render_page(
         "home",
@@ -48,8 +59,50 @@ pub async fn get_home(
                     button type="submit" class="btn btn-primary join-item" { "Search" }
                 }
             }
-            // Memory list
-            @if memories.is_empty() {
+            // Memory list (swappable HTMX fragment)
+            (list_fragment(&page))
+            // Pager controls (kept outside the swap target): total on the left,
+            // Prev/Next on the right.
+            div class="flex items-center justify-between gap-2 mt-4 w-full" {
+                span id="mem-total" class="text-xs text-base-content/60" {
+                    (format!("{} memor{}", page.total, if page.total == 1 { "y" } else { "ies" }))
+                }
+                div class="flex items-center gap-2" {
+                    button id="mem-prev" type="button" class="btn btn-sm join-item" disabled { "‹ Prev" }
+                    button id="mem-next" type="button" class="btn btn-sm join-item" { "Next ›" }
+                }
+            }
+            (pager_script())
+        },
+    )))
+}
+
+/// Serve a single memory-list page fragment for the HTMX pager.
+pub async fn get_home_list(
+    user: CurrentUser,
+    State(service): State<Arc<MemoryService>>,
+    Query(q): Query<ListCursorQuery>,
+) -> Result<Html<String>, (axum::http::StatusCode, String)> {
+    let page = service
+        .list_memories_paged(&user.id, LIST_PAGE_SIZE, q.cursor.as_deref(), None)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{}", e),
+            )
+        })?;
+
+    Ok(Html(list_fragment(&page).into_string()))
+}
+
+/// The `#memory-list` fragment. Its `data-next-cursor` and `data-total`
+/// attributes drive the pager's Next/Prev state.
+fn list_fragment(page: &MemoryPage) -> maud::Markup {
+    let next = page.next_cursor.clone().unwrap_or_default();
+    maud::html! {
+        div id="memory-list" data-next-cursor=(next) data-total=(page.total.to_string()) class="mb-4" {
+            @if page.memories.is_empty() {
                 div class="card bg-base-100 shadow-sm" {
                     div class="card-body text-center py-12" {
                         h2 class="text-lg font-semibold text-base-content/60" { "No memories yet" }
@@ -60,17 +113,17 @@ pub async fn get_home(
                 }
             } @else {
                 div class="overflow-x-auto" {
-                    table class="table table-zebra table-sm" {
+                    table class="table table-fixed table-zebra table-sm" {
                         thead {
                             tr {
                                 th { "Content" }
-                                th { "Created" }
+                                th class="w-48" { "Created" }
                             }
                         }
                         tbody {
-                            @for mem in &memories {
+                            @for mem in &page.memories {
                                 tr {
-                                    td class="max-w-xl" {
+                                    td {
                                         p class="truncate" { (mem.content) }
                                     }
                                     td class="whitespace-nowrap text-xs text-base-content/60" {
@@ -82,8 +135,66 @@ pub async fn get_home(
                     }
                 }
             }
-        },
-    )))
+        }
+    }
+}
+
+/// Inline pager logic. It keeps a stack of the fetch-cursors used to reach each
+/// visited page (starting with `null` for the first page) so that Prev can
+/// replay them in reverse. `htmx.ajax` swaps the `#memory-list` fragment.
+fn pager_script() -> maud::Markup {
+    maud::PreEscaped(
+        r#"
+<script>
+(function () {
+    var list = document.getElementById('memory-list');
+    if (!list) return;
+    var prevBtn = document.getElementById('mem-prev');
+    var nextBtn = document.getElementById('mem-next');
+    var totalEl = document.getElementById('mem-total');
+    var history = [null]; // fetch-cursor of each page visited, current page last
+
+    function nextCursor() { return list.getAttribute('data-next-cursor') || ''; }
+
+    function update() {
+        var hasNext = nextCursor() !== '';
+        nextBtn.disabled = !hasNext;
+        prevBtn.disabled = history.length < 2;
+        var total = list.getAttribute('data-total');
+        if (totalEl && total !== null && total !== '') {
+            totalEl.textContent = total + ' Memor' + (total === '1' ? 'y' : 'ies');
+        }
+    }
+
+    function load(url) {
+        htmx.ajax('GET', url, { target: '#memory-list', swap: 'outerHTML' });
+    }
+
+    nextBtn.addEventListener('click', function () {
+        var nc = nextCursor();
+        if (!nc) return;
+        history.push(nc);
+        load('/home/list?cursor=' + encodeURIComponent(nc));
+    });
+
+    prevBtn.addEventListener('click', function () {
+        if (history.length < 2) return;
+        history.pop();
+        var prev = history[history.length - 1];
+        load(prev ? '/home/list?cursor=' + encodeURIComponent(prev) : '/home/list');
+    });
+
+    document.addEventListener('htmx:afterSwap', function () {
+        list = document.getElementById('memory-list');
+        update();
+    });
+
+    update();
+})();
+</script>
+"#
+        .to_string(),
+    )
 }
 
 pub async fn post_search(
@@ -150,20 +261,20 @@ pub async fn post_search(
                 p class="text-sm text-base-content/40" { "No matches found." }
             } @else {
                 div class="overflow-x-auto" {
-                    table class="table table-zebra table-sm" {
+                    table class="table table-fixed table-zebra table-sm" {
                         thead {
                             tr {
                                 th { "Content" }
                                 @if has_scores {
                                     th class="w-24" { "Score" }
                                 }
-                                th { "Created" }
+                                th class="w-48" { "Created" }
                             }
                         }
                         tbody {
                             @for r in &results {
                                 tr {
-                                    td class="max-w-xl" {
+                                    td {
                                         p class="truncate" { (r.content) }
                                     }
                                     @if let Some(score) = r.score {

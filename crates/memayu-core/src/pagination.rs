@@ -20,19 +20,24 @@ pub const MAX_PAGE_SIZE: usize = 100;
 /// supports equality on string values; nested/range filters are V2.
 pub type MetadataFilter = HashMap<String, String>;
 
-/// A page of memories plus an opaque cursor for fetching the next page.
+/// A page of memories plus an opaque cursor for fetching the next page and the
+/// total number of rows matching the current filter.
 /// `next_cursor` is `None` when the returned page is the last one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryPage {
     pub memories: Vec<Memory>,
     pub next_cursor: Option<String>,
+    /// Total number of memories matching the query/filter (independent of the
+    /// current page window), so clients can render counts and progress.
+    pub total: usize,
 }
 
 impl MemoryPage {
-    pub fn new(memories: Vec<Memory>, next_cursor: Option<String>) -> Self {
+    pub fn new(memories: Vec<Memory>, next_cursor: Option<String>, total: usize) -> Self {
         Self {
             memories,
             next_cursor,
+            total,
         }
     }
 }

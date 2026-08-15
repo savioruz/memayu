@@ -2,6 +2,15 @@ use memayu_core::CoreError;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+/// Generic envelope for every successful `/api/*` memory response:
+/// `{ "result": <body> }`. Error responses keep their existing
+/// `ApiErrorBody` shape (`{ "error": ..., "message": ... }`) and are never
+/// wrapped.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiResult<T: ToSchema> {
+    pub result: T,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ApiErrorBody {
     pub error: String,
