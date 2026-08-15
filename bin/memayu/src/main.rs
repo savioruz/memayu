@@ -1,4 +1,4 @@
-#[cfg(any(feature = "tui", feature = "mcp"))]
+mod cli;
 mod service;
 #[cfg(feature = "tui")]
 mod tui;
@@ -21,6 +21,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = args.next().unwrap_or_else(|| "auto".into());
 
     match subcommand.as_str() {
+        // Version reporting (no config required).
+        "--version" | "-V" | "version" => {
+            cli::cmd_version();
+        }
+        // Non-interactive memory commands (single-user, in-process).
+        "add" => {
+            let config = Config::load()?;
+            run_cli(cli::cmd_add(&config, args).await);
+        }
+        "search" => {
+            let config = Config::load()?;
+            run_cli(cli::cmd_search(&config, args).await);
+        }
+        "list" => {
+            let config = Config::load()?;
+            run_cli(cli::cmd_list(&config, args).await);
+        }
+        "get" => {
+            let config = Config::load()?;
+            run_cli(cli::cmd_get(&config, args).await);
+        }
+        "delete" => {
+            let config = Config::load()?;
+            run_cli(cli::cmd_delete(&config, args).await);
+        }
         #[cfg(feature = "web")]
         "serve" => {
             let config = Config::load()?;
@@ -112,10 +137,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn run_cli(result: Result<(), String>) {
+    if let Err(e) = result {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
 fn usage() -> String {
     let mut subcommands: Vec<&str> = Vec::new();
     subcommands.push("setup");
     subcommands.push("config");
+    subcommands.push("add");
+    subcommands.push("search");
+    subcommands.push("list");
+    subcommands.push("get");
+    subcommands.push("delete");
     #[cfg(feature = "tui")]
     subcommands.push("tui");
     #[cfg(feature = "web")]
