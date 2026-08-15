@@ -570,4 +570,124 @@ mod tests {
         drop(provider);
         let _ = std::fs::remove_file(&path);
     }
+
+    #[tokio::test]
+    async fn porter_tokenizer_stems_common_inflections() {
+        let provider = LibsqlProvider::open(":memory:", 3).await.unwrap();
+        provider
+            .save_memory(&mem("m1", "u1", "She works in Jakarta", &[1.0, 0.0, 0.0]))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem(
+                "m2",
+                "u1",
+                "I am running the marathon",
+                &[0.0, 1.0, 0.0],
+            ))
+            .await
+            .unwrap();
+        provider
+            .save_memory(&mem(
+                "m3",
+                "u1",
+                "We preferred this option",
+                &[0.0, 0.0, 1.0],
+            ))
+            .await
+            .unwrap();
+
+        let work = provider.search_fulltext("u1", "work", 5).await.unwrap();
+        assert!(
+            work.iter().any(|(m, _)| m.id == "m1"),
+            "query 'work' must match stored 'works' via the full-text leg"
+        );
+
+        let run = provider.search_fulltext("u1", "run", 5).await.unwrap();
+        assert!(
+            run.iter().any(|(m, _)| m.id == "m2"),
+            "query 'run' must match stored 'running' via the full-text leg"
+        );
+
+        let prefer = provider.search_fulltext("u1", "prefer", 5).await.unwrap();
+        assert!(
+            prefer.iter().any(|(m, _)| m.id == "m3"),
+            "query 'prefer' must match stored 'preferred' via the full-text leg"
+        );
+    }
+
+    #[tokio::test]
+    async fn porter_tokenizer_migrates_old_table_and_is_idempotent() {
+        let path = std::env::temp_dir().join(format!(
+            "memayu-fts-porter-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let path_str = path.to_string_lossy().to_string();
+
+        {
+            let db = libsql::Builder::new_local(&path_str).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute(
+                "CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding FLOAT32(3) NOT NULL,
+                    metadata TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )",
+                (),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "CREATE VIRTUAL TABLE memories_fts
+                 USING fts5(content, id UNINDEXED, user_id UNINDEXED)",
+                (),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memories
+                    (id, user_id, content, embedding, metadata, created_at, updated_at)
+                 VALUES
+                    ('legacy1', 'u1', 'She works in Jakarta', X'0000803F0000000000000000',
+                     '{}', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+                (),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memories_fts (content, id, user_id)
+                 VALUES ('She works in Jakarta', 'legacy1', 'u1')",
+                (),
+            )
+            .await
+            .unwrap();
+        }
+
+        let provider = LibsqlProvider::open(&path_str, 3).await.unwrap();
+        let results = provider.search_fulltext("u1", "work", 5).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "pre-existing rows must be re-indexed under the porter tokenizer"
+        );
+        assert_eq!(results[0].0.id, "legacy1");
+        drop(provider);
+
+        let provider = LibsqlProvider::open(&path_str, 3).await.unwrap();
+        let results = provider.search_fulltext("u1", "work", 5).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "repeated open must preserve the migrated, stemming index"
+        );
+        assert_eq!(results[0].0.id, "legacy1");
+        drop(provider);
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

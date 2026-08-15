@@ -23,6 +23,12 @@ pub async fn create_schema(conn: &Connection, dimension: usize) -> Result<usize,
             .map_err(|e| StorageError::Other(format!("read schema sql: {e}")))?;
         existing = parse_dim_from_ddl(&sql);
     }
+    while rows
+        .next()
+        .await
+        .map_err(|e| StorageError::Other(format!("drain schema rows: {e}")))?
+        .is_some()
+    {}
 
     let stored_dim = match existing {
         Some(d) if d == dim => d,
@@ -62,22 +68,67 @@ pub async fn create_schema(conn: &Connection, dimension: usize) -> Result<usize,
 }
 
 /// Create the FTS5 virtual table used for the full-text leg of hybrid search.
-///
-/// `id` and `user_id` are `UNINDEXED` so they can be joined back to `memories`
-/// without polluting the full-text match columns. The virtual table is kept in
-/// sync by `LibsqlProvider` (delete-then-insert on save/update/delete), which
-/// mirrors `memories` 1:1. See issue #20.
-///
-/// Also backfills any rows that predate the FTS index, so upgrading an
-/// existing database does not silently lose its full-text signal. The backfill
-/// only inserts missing ids, keeping repeated opens idempotent and cheap.
 pub async fn create_fts(conn: &Connection) -> Result<(), StorageError> {
-    let sql = "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
-               USING fts5(content, id UNINDEXED, user_id UNINDEXED)";
-    conn.execute(sql, ())
-        .await
-        .map_err(|e| StorageError::Other(format!("create memories_fts table: {e}")))?;
+    const FTS_DDL: &str = "CREATE VIRTUAL TABLE memories_fts \
+        USING fts5(content, id UNINDEXED, user_id UNINDEXED, tokenize = 'porter unicode61')";
 
+    let existing: Option<String> = {
+        let mut rows = conn
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'",
+                (),
+            )
+            .await
+            .map_err(|e| StorageError::Other(format!("query memories_fts schema: {e}")))?;
+        let mut existing = None;
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StorageError::Other(format!("read memories_fts schema: {e}")))?
+        {
+            existing = Some(
+                row.get(0)
+                    .map_err(|e| StorageError::Other(format!("read memories_fts ddl: {e}")))?,
+            );
+        }
+        while rows
+            .next()
+            .await
+            .map_err(|e| StorageError::Other(format!("drain memories_fts schema: {e}")))?
+            .is_some()
+        {}
+        existing
+    };
+
+    match existing.as_deref() {
+        Some(ddl) if ddl.contains("porter") => {}
+        Some(_) => {
+            let tx = conn
+                .transaction()
+                .await
+                .map_err(|e| StorageError::Other(format!("begin fts migration txn: {e}")))?;
+            tx.execute("DROP TABLE memories_fts", ())
+                .await
+                .map_err(|e| StorageError::Other(format!("drop memories_fts: {e}")))?;
+            tx.execute(FTS_DDL, ())
+                .await
+                .map_err(|e| StorageError::Other(format!("create memories_fts table: {e}")))?;
+            tx.commit()
+                .await
+                .map_err(|e| StorageError::Other(format!("commit fts migration txn: {e}")))?;
+            backfill_fts(conn).await?;
+        }
+        None => {
+            conn.execute(FTS_DDL, ())
+                .await
+                .map_err(|e| StorageError::Other(format!("create memories_fts table: {e}")))?;
+            backfill_fts(conn).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn backfill_fts(conn: &Connection) -> Result<(), StorageError> {
     conn.execute(
         "INSERT INTO memories_fts (content, id, user_id)
          SELECT content, id, user_id FROM memories
