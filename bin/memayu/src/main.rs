@@ -1,4 +1,5 @@
 mod cli;
+mod doctor;
 mod service;
 #[cfg(feature = "tui")]
 mod tui;
@@ -45,6 +46,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "delete" => {
             let config = Config::load()?;
             run_cli(cli::cmd_delete(&config, args).await);
+        }
+        // Diagnostics: never requires a fully valid config, so it can report
+        // exactly what is wrong.
+        "doctor" => {
+            match Config::load() {
+                Ok(config) => std::process::exit(doctor::cmd_doctor(&config).await),
+                Err(e) => {
+                    eprintln!(
+                        "{} Could not load config: {e}",
+                        console::style("✘").red().bold()
+                    );
+                    eprintln!("{} hint: run `memayu setup` to create a config, or set the MEMAYU_* env vars", console::style("→").yellow());
+                    std::process::exit(1);
+                }
+            }
         }
         #[cfg(feature = "web")]
         "serve" => {
@@ -153,6 +169,7 @@ fn usage() -> String {
     subcommands.push("list");
     subcommands.push("get");
     subcommands.push("delete");
+    subcommands.push("doctor");
     #[cfg(feature = "tui")]
     subcommands.push("tui");
     #[cfg(feature = "web")]

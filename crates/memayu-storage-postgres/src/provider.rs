@@ -13,7 +13,37 @@ pub struct PostgresProvider {
     dimension: usize,
 }
 
+/// Non-destructive snapshot of a postgres store used by `memayu doctor`.
+#[derive(Debug, Clone)]
+pub struct PostgresStorageInfo {
+    /// Whether the `memories` table exists.
+    pub schema_exists: bool,
+    /// The stored embedding dimension, when the schema exists.
+    pub dimension: Option<usize>,
+}
+
 impl PostgresProvider {
+    /// Inspect a postgres store without running migrations: reports
+    /// reachability (via a connection), schema presence, and stored dimension.
+    pub async fn inspect(database_url: &str) -> Result<PostgresStorageInfo, StorageError> {
+        let pool = PgPool::connect(database_url)
+            .await
+            .map_err(|e| StorageError::Other(format!("connect postgres: {e}")))?;
+        let schema_exists: bool = sqlx::query_scalar("SELECT to_regclass('memories') IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| StorageError::Other(format!("check memories table: {e}")))?;
+        let dimension = if schema_exists {
+            current_dimension(&pool).await?
+        } else {
+            None
+        };
+        Ok(PostgresStorageInfo {
+            schema_exists,
+            dimension,
+        })
+    }
+
     pub async fn connect(database_url: &str, dimension: usize) -> Result<Self, StorageError> {
         let pool = PgPool::connect(database_url)
             .await

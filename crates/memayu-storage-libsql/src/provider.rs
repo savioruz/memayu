@@ -1,5 +1,5 @@
 use crate::row::memory_from_row;
-use crate::schema::create_schema;
+use crate::schema::{create_schema, stored_dimension};
 use async_trait::async_trait;
 use libsql::Connection;
 use memayu_core::{
@@ -11,7 +11,43 @@ pub struct LibsqlProvider {
     dimension: usize,
 }
 
+/// Non-destructive snapshot of a libsql store used by `memayu doctor`.
+#[derive(Debug, Clone)]
+pub struct LibsqlStorageInfo {
+    /// Whether the database file exists on disk (`:memory:` counts as existing).
+    pub database_exists: bool,
+    /// Whether the `memories` schema has been created.
+    pub schema_exists: bool,
+    /// The stored embedding dimension, when the schema exists.
+    pub dimension: Option<usize>,
+}
+
 impl LibsqlProvider {
+    /// Inspect a libsql store without creating the schema (unlike `open`).
+    /// Reports file existence, schema presence, and the stored dimension.
+    pub async fn inspect(path: &str) -> Result<LibsqlStorageInfo, StorageError> {
+        if path != ":memory:" && !std::path::Path::new(path).exists() {
+            return Ok(LibsqlStorageInfo {
+                database_exists: false,
+                schema_exists: false,
+                dimension: None,
+            });
+        }
+        let db = libsql::Builder::new_local(path)
+            .build()
+            .await
+            .map_err(|e| StorageError::Other(format!("open libsql db at {path}: {e}")))?;
+        let conn = db
+            .connect()
+            .map_err(|e| StorageError::Other(format!("connect to libsql db: {e}")))?;
+        let dimension = stored_dimension(&conn).await?;
+        Ok(LibsqlStorageInfo {
+            database_exists: true,
+            schema_exists: dimension.is_some(),
+            dimension,
+        })
+    }
+
     pub async fn open(path: &str, dimension: usize) -> Result<Self, StorageError> {
         let db = libsql::Builder::new_local(path)
             .build()

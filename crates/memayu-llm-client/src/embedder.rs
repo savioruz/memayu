@@ -1,3 +1,4 @@
+use crate::models::ModelsCheck;
 use async_trait::async_trait;
 use memayu_config::ProviderConfig;
 use memayu_core::{EmbedError, EmbedderProvider};
@@ -23,6 +24,18 @@ impl HttpEmbedderProvider {
             .build()
             .expect("reqwest::Client should build with timeouts");
         Self { client, config }
+    }
+
+    /// Probe `GET {base_url}/models` for connectivity, key validity, and model
+    /// availability without issuing an embedding request.
+    pub async fn check_models(&self) -> ModelsCheck {
+        crate::models::probe_models(
+            &self.client,
+            &self.config.base_url,
+            self.config.api_key.as_deref(),
+            &self.config.model,
+        )
+        .await
     }
 }
 
