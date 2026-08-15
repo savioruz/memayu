@@ -46,6 +46,8 @@ impl From<CoreError> for ApiError {
             CoreError::DimensionMismatch { .. } => 422,
             CoreError::InvalidExtraction(_) => 422,
             CoreError::NotFound(_) => 404,
+            CoreError::InvalidCursor(_) => 400,
+            CoreError::LimitExceeded { .. } => 400,
             _ => 500,
         };
         Self {

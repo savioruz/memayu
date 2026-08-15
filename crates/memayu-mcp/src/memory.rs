@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use memayu_core::{Memory, MemoryService, Metadata};
+use memayu_core::{Memory, MemoryService, Metadata, MetadataFilter};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,6 +26,7 @@ pub trait MemoryBackend: Send + Sync {
         user_id: &str,
         query: &str,
         limit: usize,
+        metadata_filter: Option<MetadataFilter>,
     ) -> Result<Vec<(Memory, f32)>, McpError>;
     async fn list_memories(&self, user_id: &str, limit: usize) -> Result<Vec<Memory>, McpError>;
     async fn delete_memory(&self, memory_id: &str) -> Result<(), McpError>;
@@ -104,19 +105,26 @@ impl MemoryBackend for Backend {
         user_id: &str,
         query: &str,
         limit: usize,
+        metadata_filter: Option<MetadataFilter>,
     ) -> Result<Vec<(Memory, f32)>, McpError> {
         match self {
             Backend::Local {
                 service,
                 account_id,
-            } => Ok(service.search_memory(account_id, query, limit).await?),
+            } => Ok(service
+                .search_memory_filtered(account_id, query, limit, metadata_filter.as_ref())
+                .await?),
             Backend::Cloud {
                 base_url,
                 api_key,
                 client,
             } => {
                 let url = format!("{}/api/memories/search", base_url.trim_end_matches('/'));
-                let body = serde_json::json!({"query": query, "limit": limit});
+                let mut body = serde_json::json!({"query": query, "limit": limit});
+                if let Some(f) = metadata_filter {
+                    body["metadata_filter"] = serde_json::to_value(f)
+                        .map_err(|e| McpError::Api(format!("serialize filter: {e}")))?;
+                }
                 let mut req = client.post(&url).json(&body);
                 if let Some(key) = api_key {
                     req = req.header("x-api-key", key);

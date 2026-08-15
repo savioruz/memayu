@@ -1,7 +1,9 @@
 use crate::schema::{current_dimension, set_dimension, table_is_empty};
 use async_trait::async_trait;
 use chrono::Utc;
-use memayu_core::{Memory, StorageError, StorageProvider};
+use memayu_core::{
+    decode_cursor, encode_cursor, Memory, MemoryPage, MetadataFilter, StorageError, StorageProvider,
+};
 use pgvector::Vector;
 use sqlx::postgres::{PgPool, PgRow};
 use sqlx::Row;
@@ -129,22 +131,40 @@ impl StorageProvider for PostgresProvider {
         user_id: &str,
         vector: &[f32],
         limit: usize,
+        filter: Option<&MetadataFilter>,
     ) -> Result<Vec<(Memory, f32)>, StorageError> {
         self.check_dim(vector)?;
         let q = Vector::from(vector.to_vec());
-        let rows = sqlx::query(
+
+        // $1 = query vector, $2 = user_id; a metadata filter, when present,
+        // occupies the next placeholder and shifts LIMIT one slot later.
+        let mut where_clause = String::from("user_id = $2");
+        let mut filter_value: Option<serde_json::Value> = None;
+        let mut limit_idx = 3usize;
+        if let Some(f) = filter {
+            filter_value = Some(
+                serde_json::to_value(f)
+                    .map_err(|e| StorageError::Other(format!("serialize filter: {e}")))?,
+            );
+            where_clause.push_str(&format!(" AND metadata @> ${limit_idx}::jsonb"));
+            limit_idx += 1;
+        }
+        let sql = format!(
             "SELECT id, user_id, content, embedding, metadata, created_at, updated_at,
                     (embedding <=> $1) AS score
-             FROM memories WHERE user_id = $2
+             FROM memories WHERE {where_clause}
              ORDER BY embedding <=> $1
-             LIMIT $3",
-        )
-        .bind(&q)
-        .bind(user_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| StorageError::Other(format!("search memories: {e}")))?;
+             LIMIT ${limit_idx}"
+        );
+        let mut q = sqlx::query(&sql).bind(&q).bind(user_id);
+        if let Some(v) = filter_value {
+            q = q.bind(v);
+        }
+        let rows = q
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Other(format!("search memories: {e}")))?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -166,20 +186,38 @@ impl StorageProvider for PostgresProvider {
         user_id: &str,
         query: &str,
         limit: usize,
+        filter: Option<&MetadataFilter>,
     ) -> Result<Vec<(Memory, f32)>, StorageError> {
-        let rows = sqlx::query(
+        // $1 = query, $2 = user_id; a metadata filter, when present, occupies
+        // the next placeholder and shifts LIMIT one slot later.
+        let mut where_clause =
+            String::from("user_id = $2 AND content_tsv @@ plainto_tsquery('english', $1)");
+        let mut filter_value: Option<serde_json::Value> = None;
+        let mut limit_idx = 3usize;
+        if let Some(f) = filter {
+            filter_value = Some(
+                serde_json::to_value(f)
+                    .map_err(|e| StorageError::Other(format!("serialize filter: {e}")))?,
+            );
+            where_clause.push_str(&format!(" AND metadata @> ${limit_idx}::jsonb"));
+            limit_idx += 1;
+        }
+        let sql = format!(
             "SELECT id, user_id, content, embedding, metadata, created_at, updated_at,
                     ts_rank(content_tsv, plainto_tsquery('english', $1)) AS score
-             FROM memories WHERE user_id = $2 AND content_tsv @@ plainto_tsquery('english', $1)
+             FROM memories WHERE {where_clause}
              ORDER BY score DESC
-             LIMIT $3",
-        )
-        .bind(query)
-        .bind(user_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| StorageError::Other(format!("full-text search: {e}")))?;
+             LIMIT ${limit_idx}"
+        );
+        let mut q = sqlx::query(&sql).bind(query).bind(user_id);
+        if let Some(v) = filter_value {
+            q = q.bind(v);
+        }
+        let rows = q
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Other(format!("full-text search: {e}")))?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -198,19 +236,69 @@ impl StorageProvider for PostgresProvider {
         &self,
         user_id: &str,
         limit: usize,
-    ) -> Result<Vec<Memory>, StorageError> {
-        let rows = sqlx::query(
+        cursor: Option<&str>,
+        filter: Option<&MetadataFilter>,
+    ) -> Result<MemoryPage, StorageError> {
+        // Fetch one extra row to detect another page and derive the next
+        // opaque cursor from the last visible row.
+        let fetch = limit as i64 + 1;
+
+        let mut where_clause = String::from("user_id = $1");
+        let mut param_idx = 2usize;
+        let mut filter_value: Option<serde_json::Value> = None;
+        if let Some(f) = filter {
+            filter_value = Some(
+                serde_json::to_value(f)
+                    .map_err(|e| StorageError::Other(format!("serialize filter: {e}")))?,
+            );
+            where_clause.push_str(&format!(" AND metadata @> ${param_idx}::jsonb"));
+            param_idx += 1;
+        }
+        let mut cursor_value: Option<(chrono::DateTime<Utc>, uuid::Uuid)> = None;
+        if let Some(c) = cursor {
+            let (ts, id) = decode_cursor(c).ok_or_else(|| {
+                StorageError::InvalidCursor("invalid pagination cursor".to_string())
+            })?;
+            let id: uuid::Uuid = id
+                .parse()
+                .map_err(|e| StorageError::InvalidCursor(format!("invalid cursor id: {e}")))?;
+            where_clause.push_str(&format!(
+                " AND (created_at < ${param_idx} OR (created_at = ${param_idx} AND id < ${}))",
+                param_idx + 1
+            ));
+            cursor_value = Some((ts, id));
+            param_idx += 2;
+        }
+        let sql = format!(
             "SELECT id, user_id, content, embedding, metadata, created_at, updated_at
-             FROM memories WHERE user_id = $1
-             ORDER BY created_at DESC
-             LIMIT $2",
-        )
-        .bind(user_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| StorageError::Other(format!("list memories: {e}")))?;
-        rows.iter().map(memory_from_row).collect()
+             FROM memories WHERE {where_clause}
+             ORDER BY created_at DESC, id DESC
+             LIMIT ${param_idx}"
+        );
+
+        let mut q = sqlx::query(&sql).bind(user_id);
+        if let Some(v) = filter_value {
+            q = q.bind(v);
+        }
+        if let Some((ts, id)) = cursor_value {
+            q = q.bind(ts).bind(id);
+        }
+        let rows = q
+            .bind(fetch)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Other(format!("list memories: {e}")))?;
+
+        let mut out: Vec<Memory> = rows.iter().map(memory_from_row).collect::<Result<_, _>>()?;
+        let next_cursor = if out.len() > limit {
+            let last = &out[limit - 1];
+            let cursor = encode_cursor(&last.created_at, &last.id);
+            out.truncate(limit);
+            Some(cursor)
+        } else {
+            None
+        };
+        Ok(MemoryPage::new(out, next_cursor))
     }
 
     async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
@@ -270,10 +358,19 @@ mod tests {
             updated_at: Utc::now(),
         };
         provider.save_memory(&m).await.unwrap();
-        let list = provider.list_memories("u1", 10).await.unwrap();
+        let list = provider
+            .list_memories("u1", 10, None, None)
+            .await
+            .unwrap()
+            .memories;
         assert_eq!(list.len(), 1);
         provider.delete_memory(&m.id).await.unwrap();
-        assert!(provider.list_memories("u1", 10).await.unwrap().is_empty());
+        assert!(provider
+            .list_memories("u1", 10, None, None)
+            .await
+            .unwrap()
+            .memories
+            .is_empty());
     }
 
     #[tokio::test]
@@ -304,7 +401,7 @@ mod tests {
         provider.save_memory(&m1).await.unwrap();
         provider.save_memory(&m2).await.unwrap();
         let results = provider
-            .search_memory("u1", &[0.9, 0.1, 0.0], 3)
+            .search_memory("u1", &[0.9, 0.1, 0.0], 3, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
@@ -335,7 +432,7 @@ mod tests {
         // plainto_tsquery must treat FTS-reserved characters as literal text,
         // never raising, and still match the row that contains them.
         let results = provider
-            .search_fulltext("u1", "User's project costs $500!", 5)
+            .search_fulltext("u1", "User's project costs $500!", 5, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "special-char query is literal, no crash");
@@ -362,7 +459,7 @@ mod tests {
         provider.save_memory(&m1).await.unwrap();
 
         let results = provider
-            .search_fulltext("u1", "plan 🚀 Q3 launch 💡 ideas!", 5)
+            .search_fulltext("u1", "plan 🚀 Q3 launch 💡 ideas!", 5, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "emoji query is literal, no crash");

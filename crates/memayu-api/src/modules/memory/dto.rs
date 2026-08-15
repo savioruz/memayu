@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use memayu_core::Metadata;
+use memayu_core::{Metadata, MetadataFilter};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -23,6 +23,8 @@ pub struct SearchMemoryRequest {
     pub query: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub metadata_filter: Option<MetadataFilter>,
 }
 
 fn default_limit() -> usize {
@@ -47,6 +49,32 @@ pub struct SearchResult {
 pub struct ListQuery {
     #[serde(default = "default_list_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(flatten)]
+    #[schema(value_type = std::collections::HashMap<String, String>)]
+    pub metadata_filter: MetadataFilterQuery,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MetadataFilterQuery(pub MetadataFilter);
+
+impl<'de> serde::Deserialize<'de> for MetadataFilterQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const PREFIX: &str = "metadata_filter.";
+        let pairs: std::collections::HashMap<String, String> =
+            std::collections::HashMap::deserialize(deserializer)?;
+        let mut filter = MetadataFilter::new();
+        for (k, v) in pairs {
+            if let Some(key) = k.strip_prefix(PREFIX) {
+                filter.insert(key.to_string(), v);
+            }
+        }
+        Ok(MetadataFilterQuery(filter))
+    }
 }
 
 fn default_list_limit() -> usize {
@@ -56,6 +84,7 @@ fn default_list_limit() -> usize {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListMemoryResponse {
     pub memories: Vec<ListedMemory>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

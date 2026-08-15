@@ -1,4 +1,5 @@
 use crate::extraction;
+use crate::pagination::{MemoryPage, MetadataFilter, MAX_PAGE_SIZE};
 use crate::{
     CoreError, EmbedderProvider, ExtractionDecision, ExtractionMode, ExtractionResult, LlmProvider,
     Memory, Message, Metadata, StorageError, StorageProvider,
@@ -90,7 +91,7 @@ impl MemoryService {
         const SEARCH_LIMIT: usize = 5;
         let mut candidates = self
             .storage
-            .search_memory(user_id, &vector, SEARCH_LIMIT)
+            .search_memory(user_id, &vector, SEARCH_LIMIT, None)
             .await?;
 
         // Always send all candidates to the LLM; let it decide ADD vs UPDATE.
@@ -163,7 +164,7 @@ impl MemoryService {
         const SEARCH_LIMIT: usize = 5;
         let candidates = self
             .storage
-            .search_memory(user_id, &vector, SEARCH_LIMIT)
+            .search_memory(user_id, &vector, SEARCH_LIMIT, None)
             .await?;
 
         // Near-duplicate detection: skip storage when an existing memory is
@@ -226,9 +227,27 @@ impl MemoryService {
         query: &str,
         limit: usize,
     ) -> Result<Vec<(Memory, f32)>, CoreError> {
+        self.search_memory_filtered(user_id, query, limit, None)
+            .await
+    }
+
+    pub async fn search_memory_filtered(
+        &self,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+        filter: Option<&MetadataFilter>,
+    ) -> Result<Vec<(Memory, f32)>, CoreError> {
+        validate_limit(limit)?;
         let vector = self.embedder.embed(query).await?;
-        let vector_hits = self.storage.search_memory(user_id, &vector, limit).await?;
-        let fulltext_hits = self.storage.search_fulltext(user_id, query, limit).await?;
+        let vector_hits = self
+            .storage
+            .search_memory(user_id, &vector, limit, filter)
+            .await?;
+        let fulltext_hits = self
+            .storage
+            .search_fulltext(user_id, query, limit, filter)
+            .await?;
         Ok(crate::fusion::fuse(&vector_hits, &fulltext_hits, limit))
     }
 
@@ -237,7 +256,24 @@ impl MemoryService {
         user_id: &str,
         limit: usize,
     ) -> Result<Vec<Memory>, CoreError> {
-        Ok(self.storage.list_memories(user_id, limit).await?)
+        Ok(self
+            .list_memories_paged(user_id, limit, None, None)
+            .await?
+            .memories)
+    }
+
+    pub async fn list_memories_paged(
+        &self,
+        user_id: &str,
+        limit: usize,
+        cursor: Option<&str>,
+        filter: Option<&MetadataFilter>,
+    ) -> Result<MemoryPage, CoreError> {
+        validate_limit(limit)?;
+        Ok(self
+            .storage
+            .list_memories(user_id, limit, cursor, filter)
+            .await?)
     }
 
     pub async fn delete_memory(&self, memory_id: &str) -> Result<(), CoreError> {
@@ -261,9 +297,20 @@ impl MemoryService {
     }
 }
 
+fn validate_limit(limit: usize) -> Result<(), CoreError> {
+    if limit > MAX_PAGE_SIZE {
+        return Err(CoreError::LimitExceeded {
+            limit,
+            max: MAX_PAGE_SIZE,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata_matches;
     use crate::{EmbedError, LlmError, StorageError};
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -303,12 +350,14 @@ mod tests {
             _user_id: &str,
             _vector: &[f32],
             limit: usize,
+            filter: Option<&MetadataFilter>,
         ) -> Result<Vec<(Memory, f32)>, StorageError> {
             Ok(self
                 .rows
                 .lock()
                 .unwrap()
                 .iter()
+                .filter(|m| filter.is_none_or(|f| metadata_matches(&m.metadata, f)))
                 .take(limit)
                 .cloned()
                 .map(|m| (m, self.score))
@@ -319,6 +368,7 @@ mod tests {
             _user_id: &str,
             query: &str,
             limit: usize,
+            filter: Option<&MetadataFilter>,
         ) -> Result<Vec<(Memory, f32)>, StorageError> {
             Ok(self
                 .rows
@@ -326,6 +376,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(|m| m.content.to_lowercase().contains(&query.to_lowercase()))
+                .filter(|m| filter.is_none_or(|f| metadata_matches(&m.metadata, f)))
                 .take(limit)
                 .cloned()
                 .map(|m| (m, self.score))
@@ -335,15 +386,20 @@ mod tests {
             &self,
             _user_id: &str,
             limit: usize,
-        ) -> Result<Vec<Memory>, StorageError> {
-            Ok(self
-                .rows
-                .lock()
-                .unwrap()
-                .iter()
-                .take(limit)
-                .cloned()
-                .collect())
+            _cursor: Option<&str>,
+            filter: Option<&MetadataFilter>,
+        ) -> Result<MemoryPage, StorageError> {
+            Ok(MemoryPage::new(
+                self.rows
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|m| filter.is_none_or(|f| metadata_matches(&m.metadata, f)))
+                    .take(limit)
+                    .cloned()
+                    .collect(),
+                None,
+            ))
         }
         async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
             self.rows
@@ -840,6 +896,7 @@ mod tests {
             _user_id: &str,
             _vector: &[f32],
             limit: usize,
+            _filter: Option<&MetadataFilter>,
         ) -> Result<Vec<(Memory, f32)>, StorageError> {
             Ok(self
                 .vector_rows
@@ -854,6 +911,7 @@ mod tests {
             _user_id: &str,
             _query: &str,
             limit: usize,
+            _filter: Option<&MetadataFilter>,
         ) -> Result<Vec<(Memory, f32)>, StorageError> {
             Ok(self
                 .fulltext_rows
@@ -867,8 +925,10 @@ mod tests {
             &self,
             _user_id: &str,
             _limit: usize,
-        ) -> Result<Vec<Memory>, StorageError> {
-            Ok(vec![])
+            _cursor: Option<&str>,
+            _filter: Option<&MetadataFilter>,
+        ) -> Result<MemoryPage, StorageError> {
+            Ok(MemoryPage::new(vec![], None))
         }
         async fn get_memory(&self, memory_id: &str) -> Result<Memory, StorageError> {
             Err(StorageError::Other(format!("memory {memory_id} not found")))
@@ -912,5 +972,96 @@ mod tests {
         let results = svc.search_memory("u1", "query", 10).await.unwrap();
 
         assert_eq!(results[0].0.id, "a", "present in both lists wins under RRF");
+    }
+
+    fn mem_with_meta(id: &str, content: &str, pairs: &[(&str, &str)]) -> Memory {
+        let mut m = mem(id, "u1", content);
+        m.metadata = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        m
+    }
+
+    #[tokio::test]
+    async fn search_cap_is_enforced() {
+        let svc = service_with(
+            MockStorage {
+                rows: Mutex::new(vec![]),
+                score: 0.0,
+            },
+            MockLlm::scripted(vec![]),
+        );
+        let err = svc
+            .search_memory("u1", "q", MAX_PAGE_SIZE + 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::LimitExceeded { limit, max } if limit == MAX_PAGE_SIZE + 1 && max == MAX_PAGE_SIZE
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_cap_is_enforced() {
+        let svc = service_with(
+            MockStorage {
+                rows: Mutex::new(vec![]),
+                score: 0.0,
+            },
+            MockLlm::scripted(vec![]),
+        );
+        let err = svc
+            .list_memories("u1", MAX_PAGE_SIZE + 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::LimitExceeded { .. }));
+    }
+
+    #[tokio::test]
+    async fn filtered_search_restricts_results() {
+        let storage = MockStorage {
+            rows: Mutex::new(vec![
+                mem_with_meta("a", "loves hiking", &[("source", "telegram")]),
+                mem_with_meta("b", "loves hiking", &[("source", "cli")]),
+                mem_with_meta("c", "loves hiking", &[("source", "telegram")]),
+            ]),
+            score: 0.9,
+        };
+        let svc = service_with(storage, MockLlm::scripted(vec![]));
+
+        let filter = HashMap::from([("source".to_string(), "telegram".to_string())]);
+        let results = svc
+            .search_memory_filtered("u1", "hiking", 10, Some(&filter))
+            .await
+            .unwrap();
+
+        let mut ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["a", "c"], "only telegram-sourced rows must match");
+    }
+
+    #[tokio::test]
+    async fn filtered_list_restricts_results() {
+        let storage = MockStorage {
+            rows: Mutex::new(vec![
+                mem_with_meta("a", "note one", &[("label", "work")]),
+                mem_with_meta("b", "note two", &[("label", "personal")]),
+                mem_with_meta("c", "note three", &[("label", "work")]),
+            ]),
+            score: 0.0,
+        };
+        let svc = service_with(storage, MockLlm::scripted(vec![]));
+
+        let filter = HashMap::from([("label".to_string(), "work".to_string())]);
+        let page = svc
+            .list_memories_paged("u1", 10, None, Some(&filter))
+            .await
+            .unwrap();
+
+        let mut ids: Vec<&str> = page.memories.iter().map(|m| m.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["a", "c"]);
+        assert!(page.next_cursor.is_none());
     }
 }

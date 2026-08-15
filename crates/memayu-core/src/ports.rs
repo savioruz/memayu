@@ -1,3 +1,4 @@
+use crate::pagination::{MemoryPage, MetadataFilter};
 use crate::Memory;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -10,6 +11,10 @@ pub enum StorageError {
     Other(String),
     #[error("dimension mismatch: provider produces {got}-dim, stored data uses {expected}-dim")]
     DimensionMismatch { expected: usize, got: usize },
+    #[error("limit {limit} exceeds the maximum of {max}")]
+    LimitExceeded { limit: usize, max: usize },
+    #[error("invalid pagination cursor: {0}")]
+    InvalidCursor(String),
 }
 
 #[derive(Debug, Error)]
@@ -35,6 +40,7 @@ pub trait StorageProvider: Send + Sync {
         user_id: &str,
         vector: &[f32],
         limit: usize,
+        filter: Option<&MetadataFilter>,
     ) -> Result<Vec<(Memory, f32)>, StorageError>;
     /// Full-text search over memory content, ranked natively (higher = better).
     ///
@@ -45,9 +51,16 @@ pub trait StorageProvider: Send + Sync {
         user_id: &str,
         query: &str,
         limit: usize,
+        filter: Option<&MetadataFilter>,
     ) -> Result<Vec<(Memory, f32)>, StorageError>;
-    async fn list_memories(&self, user_id: &str, limit: usize)
-        -> Result<Vec<Memory>, StorageError>;
+
+    async fn list_memories(
+        &self,
+        user_id: &str,
+        limit: usize,
+        cursor: Option<&str>,
+        filter: Option<&MetadataFilter>,
+    ) -> Result<MemoryPage, StorageError>;
     async fn delete_memory(&self, memory_id: &str) -> Result<(), StorageError>;
 }
 
