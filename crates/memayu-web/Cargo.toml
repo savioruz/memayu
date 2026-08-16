@@ -9,6 +9,7 @@ memayu-core = { path = "../memayu-core" }
 memayu-config = { path = "../memayu-config" }
 memayu-api = { path = "../memayu-api" }
 memayu-llm-client = { path = "../memayu-llm-client" }
+memayu-setup = { path = "../memayu-setup" }
 axum = { version = "0.8", features = ["macros"] }
 maud = "0.27"
 serde = { version = "1", features = ["derive"] }

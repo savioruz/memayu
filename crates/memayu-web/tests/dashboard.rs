@@ -49,7 +49,7 @@ fn test_storage_config() -> StorageConfig {
 
 fn test_provider(name: &str) -> memayu_config::ProviderConfig {
     memayu_config::ProviderConfig {
-        backend: memayu_config::EmbedderBackend::Http,
+        backend: memayu_config::EmbedderBackend::Remote,
         base_url: format!("http://127.0.0.1/{name}"),
         api_key: Some(format!("key-{name}")),
         model: format!("model-{name}"),
@@ -161,7 +161,7 @@ async fn setup_login_home_flow() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // 3. POST /setup creates admin + session cookie.
+    // 3. POST /setup creates admin + redirects to /home with new_key query parameter.
     let resp = app
         .clone()
         .oneshot(
@@ -177,6 +177,14 @@ async fn setup_login_home_flow() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(loc.starts_with("/home?new_key="));
     let cookie = resp
         .headers()
         .get("set-cookie")
@@ -185,17 +193,13 @@ async fn setup_login_home_flow() {
         .unwrap()
         .to_string();
     assert!(cookie.contains("memayu_session="));
-    assert_eq!(
-        resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/home"
-    );
 
-    // 4. Access /home with the session cookie.
+    // 4. Access redirected URL (/home?new_key=...) with the session cookie -> shows dashboard with modal.
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/home")
+                .uri(&loc)
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -203,6 +207,12 @@ async fn setup_login_home_flow() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(body_str.contains("setup-key-modal"));
+    assert!(body_str.contains("Key created: default"));
 }
 
 #[tokio::test]
