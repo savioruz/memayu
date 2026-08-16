@@ -249,6 +249,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_memories_batch_stores_all() {
+        let (app, cookie) = setup_and_login().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memories/batch")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(
+                        r#"{
+                            "memories": [
+                                {"content":"loves hiking","metadata":{"source":"batch"}},
+                                {"content":"prefers coffee"},
+                                {"content":"works remote"}
+                            ]
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["added"], 3);
+        assert_eq!(parsed["memory_ids"].as_array().unwrap().len(), 3);
+        assert!(parsed["errors"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_memories_batch_reports_per_item_errors() {
+        let (app, cookie) = setup_and_login().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memories/batch")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(
+                        r#"{
+                            "memories": [
+                                {"content":"valid one"},
+                                {"content":"   "},
+                                {"content":"valid two"}
+                            ]
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let parsed = parsed["result"].clone();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["added"], 2, "valid items must be stored");
+        assert_eq!(parsed["memory_ids"].as_array().unwrap().len(), 2);
+        let errors = parsed["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1, "blank item must be reported as a failure");
+        assert_eq!(errors[0]["index"], 1);
+        assert!(errors[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("content is required"));
+    }
+
+    #[tokio::test]
+    async fn add_memories_batch_rejects_empty() {
+        let (app, cookie) = setup_and_login().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memories/batch")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(r#"{"memories":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn metadata_round_trips_in_search_and_list() {
         let (app, cookie) = setup_and_login().await;
 

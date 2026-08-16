@@ -6,11 +6,14 @@
 //! single-user by design: the user id comes from the config (default `default`)
 //! and no auth is required for a local instance.
 
-use memayu_config::Config;
-use std::collections::{HashMap, HashSet};
-
 use crate::service::build_service;
-use memayu_core::{Memory, MetadataFilter, MAX_PAGE_SIZE};
+use memayu_config::Config;
+use memayu_core::{
+    BatchItemResult, BatchMemory, Memory, MemoryService, MetadataFilter, MAX_PAGE_SIZE,
+};
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
 
 /// Default user id for the local single-user CLI.
 pub const DEFAULT_USER_ID: &str = "default";
@@ -53,7 +56,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Parsed {
         if let Some(rest) = a.strip_prefix("--") {
             if let Some((k, v)) = rest.split_once('=') {
                 insert_flag(&mut p, k, v.to_string());
-            } else if matches!(rest, "limit" | "cursor" | "filter") {
+            } else if matches!(rest, "limit" | "cursor" | "filter" | "batch") {
                 let v = it.next().unwrap_or_default();
                 insert_flag(&mut p, rest, v);
             } else {
@@ -158,19 +161,100 @@ fn reject_unknown(
 /// `memayu add "<content>"` — run ADD/UPDATE extraction and store the memory.
 pub async fn cmd_add(config: &Config, args: impl Iterator<Item = String>) -> Result<(), String> {
     let p = parse_args(args);
-    reject_unknown(&p, &[], &[])?;
-    let content = p.positionals.join(" ").trim().to_string();
-    if content.is_empty() {
-        return Err("usage: memayu add \"<content>\"".to_string());
-    }
+    reject_unknown(&p, &["batch"], &[])?;
     guard_local(config)?;
     let (service, _) = build_service(config).await.map_err(|e| e.to_string())?;
+
+    if let Some(path) = p.opts.get("batch") {
+        if !p.positionals.is_empty() {
+            return Err("--batch cannot be combined with positional content".to_string());
+        }
+        return cmd_add_batch(&service, path).await;
+    }
+
+    let content = p.positionals.join(" ").trim().to_string();
+    if content.is_empty() {
+        return Err("usage: memayu add \"<content>\" | --batch <file.jsonl | ->".to_string());
+    }
     let mem = service
         .add_memory(DEFAULT_USER_ID, &content, &Default::default())
         .await
         .map_err(|e| e.to_string())?;
     println!("stored: {}", mem.id);
     Ok(())
+}
+
+/// `memayu add --batch <file.jsonl | ->` — store many memories at once.
+/// Each line is a JSON object with a `content` field (and optional `metadata`).
+/// A `-` path reads from stdin. Per-item failures don't abort the batch.
+async fn cmd_add_batch(service: &MemoryService, path: &str) -> Result<(), String> {
+    let reader: Box<dyn BufRead> = if path == "-" {
+        Box::new(BufReader::new(io::stdin()))
+    } else {
+        let file = File::open(path).map_err(|e| format!("cannot open {path}: {e}"))?;
+        Box::new(BufReader::new(file))
+    };
+
+    let mut items = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line
+            .map_err(|e| format!("read {path} line {line_no}: {e}"))?
+            .trim()
+            .to_string();
+        if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|e| format!("{path}:{line_no}: invalid JSON: {e}"))?;
+        let content = value
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        let metadata = value
+            .get("metadata")
+            .and_then(|m| m.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        items.push(BatchMemory { content, metadata });
+    }
+
+    if items.is_empty() {
+        return Err(format!(
+            "{path}: no memories found (file is empty or all blank)"
+        ));
+    }
+
+    let results = service
+        .add_memories_batch(DEFAULT_USER_ID, &items)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut added = 0usize;
+    let mut failed = 0usize;
+    for result in &results {
+        match result {
+            BatchItemResult::Stored { memory_id } => {
+                added += 1;
+                println!("stored: {memory_id}");
+            }
+            BatchItemResult::Failed { error } => {
+                failed += 1;
+                eprintln!("failed: {error}");
+            }
+        }
+    }
+    println!("added: {added} memory(ies)");
+    if failed > 0 {
+        Err(format!("{failed} item(s) failed"))
+    } else {
+        Ok(())
+    }
 }
 
 /// `memayu search "<query>" [--limit N] [--filter key=value] [--json]` —

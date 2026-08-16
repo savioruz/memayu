@@ -12,6 +12,22 @@ use uuid::Uuid;
 /// as a duplicate of an existing one. Above this value, ingestion is a NOOP.
 pub const RAW_DEDUPE_THRESHOLD: f32 = 0.98;
 
+/// One memory to insert as part of a batch.
+#[derive(Debug, Clone)]
+pub struct BatchMemory {
+    pub content: String,
+    pub metadata: Metadata,
+}
+
+/// Per-item outcome of [`MemoryService::add_memories_batch`]. A single failed
+/// item does not abort the rest of the batch; failures are reported alongside
+/// the stored ids.
+#[derive(Debug)]
+pub enum BatchItemResult {
+    Stored { memory_id: String },
+    Failed { error: String },
+}
+
 pub struct MemoryService {
     storage: Arc<dyn StorageProvider>,
     embedder: Arc<dyn EmbedderProvider>,
@@ -219,6 +235,40 @@ impl MemoryService {
                 })
             }
         }
+    }
+
+    /// Insert many memories in a single call. Each item is ingested through the
+    /// same ADD/UPDATE pipeline as [`MemoryService::add_memory`], so per-item
+    /// failures (empty content, embed/LLM errors) are collected rather than
+    /// aborting the whole batch. The outer `Err` is reserved for request-level
+    /// errors, such as an empty batch.
+    pub async fn add_memories_batch(
+        &self,
+        user_id: &str,
+        items: &[BatchMemory],
+    ) -> Result<Vec<BatchItemResult>, CoreError> {
+        if items.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "batch must contain at least one memory".into(),
+            ));
+        }
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+            let content = item.content.trim();
+            if content.is_empty() {
+                results.push(BatchItemResult::Failed {
+                    error: "memory content is required".into(),
+                });
+                continue;
+            }
+            match self.add_memory(user_id, content, &item.metadata).await {
+                Ok(mem) => results.push(BatchItemResult::Stored { memory_id: mem.id }),
+                Err(e) => results.push(BatchItemResult::Failed {
+                    error: e.to_string(),
+                }),
+            }
+        }
+        Ok(results)
     }
 
     pub async fn search_memory(
@@ -1073,5 +1123,101 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(ids, vec!["a", "c"]);
         assert!(page.next_cursor.is_none());
+    }
+
+    // ── issue #53: batch add ──
+
+    #[tokio::test]
+    async fn add_memories_batch_stores_multiple_items() {
+        let storage = MockStorage {
+            rows: Mutex::new(vec![]),
+            score: 0.0,
+        };
+        let svc = raw_service_with(storage);
+
+        let items = vec![
+            BatchMemory {
+                content: "loves hiking".into(),
+                metadata: HashMap::from([("source".into(), "batch".into())]),
+            },
+            BatchMemory {
+                content: "prefers coffee".into(),
+                metadata: HashMap::new(),
+            },
+            BatchMemory {
+                content: "works remote".into(),
+                metadata: HashMap::new(),
+            },
+        ];
+
+        let results = svc.add_memories_batch("u1", &items).await.unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert!(results
+            .iter()
+            .all(|r| matches!(r, BatchItemResult::Stored { .. })));
+        // All three rows landed, with the batch metadata attached.
+        let rows = svc.list_memories("u1", 10).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows
+            .iter()
+            .any(|m| m.metadata.get("source") == Some(&"batch".to_string())));
+    }
+
+    #[tokio::test]
+    async fn add_memories_batch_collects_per_item_errors() {
+        let storage = MockStorage {
+            rows: Mutex::new(vec![]),
+            score: 0.0,
+        };
+        let svc = raw_service_with(storage);
+
+        let items = vec![
+            BatchMemory {
+                content: "valid one".into(),
+                metadata: HashMap::new(),
+            },
+            BatchMemory {
+                content: "   ".into(), // blank -> per-item failure
+                metadata: HashMap::new(),
+            },
+            BatchMemory {
+                content: "valid two".into(),
+                metadata: HashMap::new(),
+            },
+        ];
+
+        let results = svc.add_memories_batch("u1", &items).await.unwrap();
+
+        assert_eq!(results.len(), 3);
+        let stored: Vec<&BatchItemResult> = results
+            .iter()
+            .filter(|r| matches!(r, BatchItemResult::Stored { .. }))
+            .collect();
+        let failed: Vec<&BatchItemResult> = results
+            .iter()
+            .filter(|r| matches!(r, BatchItemResult::Failed { .. }))
+            .collect();
+        assert_eq!(stored.len(), 2, "valid items must still be stored");
+        assert_eq!(failed.len(), 1, "blank item must be reported as failed");
+        match failed[0] {
+            BatchItemResult::Failed { error } => {
+                assert!(error.contains("content is required"), "error: {error}")
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(svc.list_memories("u1", 10).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn add_memories_batch_rejects_empty_batch() {
+        let storage = MockStorage {
+            rows: Mutex::new(vec![]),
+            score: 0.0,
+        };
+        let svc = raw_service_with(storage);
+
+        let err = svc.add_memories_batch("u1", &[]).await.unwrap_err();
+        assert!(matches!(err, CoreError::InvalidInput(_)));
     }
 }

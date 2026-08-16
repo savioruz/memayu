@@ -14,6 +14,8 @@ pub enum CoreError {
     DimensionMismatch { expected: usize, got: usize },
     #[error("extraction result invalid: {0}")]
     InvalidExtraction(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("limit {limit} exceeds the maximum of {max}")]

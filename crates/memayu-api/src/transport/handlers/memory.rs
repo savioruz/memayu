@@ -2,15 +2,15 @@
 /// the core MemoryService.
 use crate::error::{ApiError, ApiErrorBody, ApiResult};
 use crate::modules::memory::dto::{
-    AddMemoryRequest, AddMemoryResponse, ListMemoryResponse, ListQuery, ListedMemory,
-    SearchMemoryRequest, SearchMemoryResponse, SearchResult, UpdateMemoryRequest,
-    UpdateMemoryResponse,
+    AddMemoriesBatchRequest, AddMemoriesBatchResponse, AddMemoryRequest, AddMemoryResponse,
+    BatchMemoryError, ListMemoryResponse, ListQuery, ListedMemory, SearchMemoryRequest,
+    SearchMemoryResponse, SearchResult, UpdateMemoryRequest, UpdateMemoryResponse,
 };
 use crate::transport::middleware::{AccountId, ApiState};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use memayu_core::MetadataFilter;
+use memayu_core::{BatchItemResult, BatchMemory, MetadataFilter};
 
 /// Add a new memory for a user
 #[utoipa::path(
@@ -47,6 +47,62 @@ pub async fn add_memory(
             },
         }),
     ))
+}
+
+/// Add many memories for a user in a single call. A failure on one item does
+/// not fail the rest; successes are reported via `added`/`memory_ids` and
+/// failures via `errors`.
+#[utoipa::path(
+    post,
+    path = "/api/memories/batch",
+    request_body = AddMemoriesBatchRequest,
+    responses(
+        (status = 200, description = "Memories added", body = ApiResult<AddMemoriesBatchResponse>),
+        (status = 400, description = "Bad request", body = ApiErrorBody),
+    )
+)]
+pub async fn add_memories_batch(
+    State(state): State<ApiState>,
+    _account: AccountId,
+    Json(req): Json<AddMemoriesBatchRequest>,
+) -> Result<Json<ApiResult<AddMemoriesBatchResponse>>, ApiError> {
+    let user_id = &_account.0;
+    if req.memories.is_empty() {
+        return Err(ApiError::bad_request("memories must not be empty"));
+    }
+
+    let items: Vec<BatchMemory> = req
+        .memories
+        .into_iter()
+        .map(|m| BatchMemory {
+            content: m.content,
+            metadata: m.metadata,
+        })
+        .collect();
+
+    let results = state.service.add_memories_batch(user_id, &items).await?;
+
+    let mut added = 0usize;
+    let mut memory_ids = Vec::new();
+    let mut errors = Vec::new();
+    for (index, outcome) in results.into_iter().enumerate() {
+        match outcome {
+            BatchItemResult::Stored { memory_id } => {
+                added += 1;
+                memory_ids.push(memory_id);
+            }
+            BatchItemResult::Failed { error } => errors.push(BatchMemoryError { index, error }),
+        }
+    }
+
+    Ok(Json(ApiResult {
+        result: AddMemoriesBatchResponse {
+            status: "success".into(),
+            added,
+            memory_ids,
+            errors,
+        },
+    }))
 }
 
 /// Search memories by semantic similarity
