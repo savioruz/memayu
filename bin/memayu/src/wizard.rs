@@ -1,16 +1,42 @@
+//! CLI-interactive setup wizard (dialoguer, plain stdin/stdout) — the default
+//! presentation of the shared setup flow (#54).
+//!
+//! `memayu setup` runs this presenter. It reads an existing config file (if
+//! present) as defaults for re-configuration, walks the exact same ordered
+//! [`crate::setup_flow::SETUP_STEPS`] as the `--tui` presenter, and hands the
+//! collected answers to [`finalize`], which writes the config, creates the
+//! admin account, and generates the API key.
+
 use dialoguer::{theme::ColorfulTheme, Input, Select};
-use memayu_config::{config_path, ConfigFile};
+use memayu_config::{config_path, read_config_file, StorageBackend};
+use memayu_llm_client::local_embedder::DEFAULT_MODEL_ID;
+use std::io::IsTerminal;
+
+use crate::setup_flow::{
+    check_device, finalize, fmt_bytes, fmt_cpu, step_active, step_title, DeviceReport,
+    SetupAnswers, SetupStep, LOCAL_MODELS, LOCAL_MODEL_NAMES, SETUP_STEPS,
+};
 
 fn prompt(label: &str, default: &str) -> String {
-    let result = Input::<String>::with_theme(&ColorfulTheme::default())
+    Input::<String>::with_theme(&ColorfulTheme::default())
         .with_prompt(label)
         .default(default.to_string())
         .interact_text()
-        .unwrap_or_default();
-    result.trim().to_string()
+        .unwrap_or_else(|_| default.to_string())
 }
 
-pub fn run_wizard() -> Result<String, Box<dyn std::error::Error>> {
+fn select(label: &str, items: &[&str], default: usize) -> usize {
+    Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(label)
+        .items(items)
+        .default(default)
+        .interact()
+        .unwrap_or(default)
+}
+
+/// Run the CLI-interactive setup wizard. `preseed` toggles whether an existing
+/// config file is used to pre-fill defaults (re-configuration).
+pub async fn run_cli_setup(preseed: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
         console::style("  memayu setup  — first-run configuration wizard")
@@ -19,430 +45,198 @@ pub fn run_wizard() -> Result<String, Box<dyn std::error::Error>> {
     );
     println!();
 
-    // ── Storage ──
-    println!("{}", console::style("── Storage ──").bold().dim());
-    let backends = vec!["libsql", "postgres"];
-    let backend_idx = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Storage backend")
-        .items(&backends)
-        .default(0)
-        .interact()?;
-    let backend = backends[backend_idx];
-
-    let libsql_path = if backend == "libsql" {
-        prompt("libsql database path", "./memayu.db")
+    let existing = if preseed {
+        read_config_file(&config_path()).ok().flatten()
     } else {
-        String::new()
+        None
     };
+    let mut a = crate::setup_flow::preseed(existing.as_ref());
+    // Probe the device once up front so the DeviceCheck step and the local
+    // embedder gating share the same report.
+    a.device = check_device();
 
-    let database_url = if backend == "postgres" {
-        prompt("Postgres connection URL", "postgres://localhost/memayu")
-    } else {
-        String::new()
-    };
-
-    println!();
-
-    // ── LLM ──
-    println!("{}", console::style("── LLM Provider ──").bold().dim());
-    let llm_base_url = prompt("Base URL", "https://api.openai.com/v1");
-    let llm_api_key = prompt("API key (optional, press enter to skip)", "");
-    let llm_model = prompt("Model", "gpt-4");
-
-    println!();
-
-    // ── Embedder ──
-    println!("{}", console::style("── Embedder Provider ──").bold().dim());
-    let emb_backends = vec!["local", "http"];
-    let emb_backend_idx = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Embedding backend (local = on-device Candle, http = bring-your-own-key)")
-        .items(&emb_backends)
-        .default(0)
-        .interact()?;
-    let emb_backend = emb_backends[emb_backend_idx];
-    let (emb_base_url, emb_api_key, emb_model) = if emb_backend == "local" {
-        (
-            String::new(),
-            String::new(),
-            memayu_llm_client::local_embedder::DEFAULT_MODEL_ID.to_string(),
-        )
-    } else {
-        let base = prompt("Base URL", "https://api.openai.com/v1");
-        let key = prompt("API key (optional, press enter to skip)", "");
-        let model = prompt("Model", "text-embedding-3-small");
-        (base, key, model)
-    };
-
-    println!();
-
-    // ── Server ──
-    println!("{}", console::style("── Server ──").bold().dim());
-    let bind_addr = prompt("Bind address", "127.0.0.1");
-    let port_str = prompt("Port", "18080");
-    let port: u16 = port_str.parse().unwrap_or(18080);
-
-    println!();
-
-    // ── Behavior ──
-    println!("{}", console::style("── Behavior ──").bold().dim());
-    let sim_str = prompt("Similarity threshold (0.0-1.0)", "0.65");
-    let similarity_threshold: f32 = sim_str.parse().unwrap_or(0.65);
-
-    let modes = vec!["llm", "raw"];
-    let mode_idx = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Extraction mode")
-        .items(&modes)
-        .default(0)
-        .interact()?;
-    let extraction_mode = modes[mode_idx].to_string();
-
-    // ── Build ConfigFile and serialize ──
-    let cf = ConfigFile {
-        storage: Some(memayu_config::StorageConfigFile {
-            backend: backend.to_string(),
-            libsql_path: if libsql_path.is_empty() {
-                None
-            } else {
-                Some(libsql_path)
-            },
-            database_url: if database_url.is_empty() {
-                None
-            } else {
-                Some(database_url)
-            },
-        }),
-        llm: Some(memayu_config::ProviderConfigFile {
-            backend: Some("http".to_string()),
-            base_url: Some(llm_base_url),
-            api_key: if llm_api_key.is_empty() {
-                None
-            } else {
-                Some(llm_api_key)
-            },
-            model: Some(llm_model),
-        }),
-        embedder: Some(memayu_config::ProviderConfigFile {
-            backend: Some(emb_backend.to_string()),
-            base_url: if emb_base_url.is_empty() {
-                None
-            } else {
-                Some(emb_base_url)
-            },
-            api_key: if emb_api_key.is_empty() {
-                None
-            } else {
-                Some(emb_api_key)
-            },
-            model: Some(emb_model),
-        }),
-        server: Some(memayu_config::ServerConfigFile {
-            bind_addr: Some(bind_addr),
-            port: Some(port),
-        }),
-        behavior: Some(memayu_config::BehaviorConfigFile {
-            similarity_threshold: Some(similarity_threshold),
-            extraction_mode: Some(extraction_mode),
-        }),
-    };
-
-    let toml_str = toml::to_string_pretty(&cf)?;
-    let path = config_path();
-
-    // Create parent directory
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    // Walk the shared step list, skipping branch-inactive steps.
+    for &step in SETUP_STEPS {
+        if !step_active(step, &a) {
+            continue;
+        }
+        render_step(step, &mut a)?;
     }
 
-    std::fs::write(&path, &toml_str)?;
-
     println!();
+    let result = finalize(&a).await?;
     println!(
         "{} Written to {}",
         console::style("✔").green().bold(),
-        path.display()
+        result.config_path.display()
     );
     println!();
+    println!("{}", console::style("API key (shown once)").bold().cyan());
+    println!("  {}", console::style(&result.api_key).bold().yellow());
     println!(
-        "  {}",
-        console::style(
-            "Run 'memayu serve' to start the server, or 'memayu config show' to review."
-        )
-        .dim()
+        "{} store it now — it cannot be retrieved again",
+        console::style("→").yellow()
     );
-
-    Ok(toml_str)
+    Ok(())
 }
 
-/// Run the wizard with pre-filled values from a previous file (for re-config).
-pub fn run_wizard_preseed(skip_intro: bool) -> Result<String, Box<dyn std::error::Error>> {
-    if !skip_intro {
+fn render_step(step: SetupStep, a: &mut SetupAnswers) -> Result<(), Box<dyn std::error::Error>> {
+    match step {
+        SetupStep::DeviceCheck => {
+            print_device_report(&a.device);
+            // Pause only when interactive so the report is readable; skip the
+            // keypress when headless/piped (no TTY) to avoid blocking.
+            if std::io::stdin().is_terminal() {
+                let _ = Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Press Enter to continue")
+                    .allow_empty(true)
+                    .interact_text();
+            }
+        }
+        SetupStep::StorageBackend => {
+            let items = ["libsql", "postgres"];
+            let default = if a.storage_backend == StorageBackend::Postgres {
+                1
+            } else {
+                0
+            };
+            let idx = select(step_title(step), &items, default);
+            a.storage_backend = if items[idx] == "postgres" {
+                StorageBackend::Postgres
+            } else {
+                StorageBackend::Libsql
+            };
+        }
+        SetupStep::StoragePath => match a.storage_backend {
+            StorageBackend::Libsql => {
+                a.libsql_path = prompt("libsql database path", &a.libsql_path);
+            }
+            StorageBackend::Postgres => {
+                let default = if a.database_url.is_empty() {
+                    "postgres://localhost/memayu"
+                } else {
+                    &a.database_url
+                };
+                a.database_url = prompt("Postgres connection URL", default);
+            }
+        },
+        SetupStep::EmbedderBackend => {
+            if a.device.local_supported {
+                let items = ["local", "http"];
+                let default = if a.embedder_backend == "http" { 1 } else { 0 };
+                let idx = select(
+                    "Embedding backend (local = on-device Candle, http = bring-your-own-key)",
+                    &items,
+                    default,
+                );
+                a.embedder_backend = items[idx].to_string();
+                if a.embedder_backend == "local" {
+                    a.embedder_model = DEFAULT_MODEL_ID.to_string();
+                }
+            } else {
+                println!(
+                    "{} local embedding is not supported on this device, using HTTP embedder.",
+                    console::style("→").yellow()
+                );
+                a.embedder_backend = "http".to_string();
+            }
+        }
+        SetupStep::LocalModel => {
+            print_local_model_table();
+            let default = LOCAL_MODELS
+                .iter()
+                .position(|m| m.id == a.embedder_model)
+                .unwrap_or(0);
+            let idx = select("Local embedding model", LOCAL_MODEL_NAMES, default);
+            a.embedder_model = LOCAL_MODELS[idx].id.to_string();
+        }
+        SetupStep::EmbedderConfig => {
+            a.embedder_base_url = prompt("Base URL", &a.embedder_base_url);
+            a.embedder_api_key = prompt(
+                "API key (optional, press enter to skip)",
+                &a.embedder_api_key,
+            );
+            a.embedder_model = prompt("Model", &a.embedder_model);
+        }
+        SetupStep::ExtractionMode => {
+            let items = ["llm", "raw"];
+            let default = if a.extraction_mode == "raw" { 1 } else { 0 };
+            let idx = select(step_title(step), &items, default);
+            a.extraction_mode = items[idx].to_string();
+        }
+        SetupStep::LlmConfig => {
+            a.llm_base_url = prompt("Base URL", &a.llm_base_url);
+            a.llm_api_key = prompt("API key (optional, press enter to skip)", &a.llm_api_key);
+            a.llm_model = prompt("Model", &a.llm_model);
+        }
+        SetupStep::AdminEmail => {
+            a.admin_email = prompt("Admin email", &a.admin_email);
+        }
+        SetupStep::AdminPassword => {
+            a.admin_password = prompt("Password (min 8 chars, uppercase+lowercase+digit)", "");
+        }
+        SetupStep::AdminConfirm => loop {
+            let confirm = prompt("Confirm password", "");
+            if confirm == a.admin_password {
+                break;
+            }
+            eprintln!(
+                "{} passwords do not match, try again",
+                console::style("✘").red()
+            );
+        },
+        SetupStep::BindAddr => {
+            a.bind_addr = prompt("Bind address", &a.bind_addr);
+        }
+        SetupStep::Port => {
+            let s = prompt("Port", &a.port.to_string());
+            a.port = s.parse().unwrap_or(18080);
+        }
+        SetupStep::ApiKeyLabel => {
+            a.api_key_label = prompt("API key name", &a.api_key_label);
+        }
+    }
+    Ok(())
+}
+
+/// Print the device capability report from the DeviceCheck step.
+fn print_device_report(d: &DeviceReport) {
+    println!();
+    println!("{} Device check", console::style("•").bold().cyan());
+    println!("  OS / arch   {} / {}", d.os, d.arch);
+    println!("  CPU         {}", fmt_cpu(d));
+    println!("  RAM          {}", fmt_bytes(d.ram_bytes));
+    println!("  Free disk   {}", fmt_bytes(d.free_disk_bytes));
+    if d.local_supported {
+        println!("  Local embed {}", console::style("supported").green());
+    } else {
         println!(
-            "{}",
-            console::style("  memayu setup  — re-configure")
-                .bold()
-                .cyan()
+            "  Local embed {}",
+            console::style("NOT supported").red().bold()
         );
-        println!();
+        for issue in &d.issues {
+            println!("     - {issue}");
+        }
     }
-
-    let existing = memayu_config::read_config_file(&config_path())
-        .ok()
-        .flatten();
-
-    // ── Storage ──
-    println!("{}", console::style("── Storage ──").bold().dim());
-    let current_backend = existing
-        .as_ref()
-        .and_then(|e| e.storage.as_ref())
-        .and_then(|s| s.backend.parse::<memayu_config::StorageBackend>().ok())
-        .map(|b| b.to_string());
-    let backends = vec!["libsql", "postgres"];
-    let default_idx = match current_backend.as_deref() {
-        Some("postgres") => 1,
-        _ => 0,
-    };
-    let backend_idx = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Storage backend")
-        .items(&backends)
-        .default(default_idx)
-        .interact()?;
-    let backend = backends[backend_idx];
-
-    let libsql_path = if backend == "libsql" {
-        prompt(
-            "libsql database path",
-            &existing
-                .as_ref()
-                .and_then(|e| e.storage.as_ref())
-                .and_then(|s| s.libsql_path.clone())
-                .unwrap_or_else(|| "./memayu.db".into()),
-        )
-    } else {
-        String::new()
-    };
-
-    let database_url = if backend == "postgres" {
-        prompt(
-            "Postgres connection URL",
-            &existing
-                .as_ref()
-                .and_then(|e| e.storage.as_ref())
-                .and_then(|s| s.database_url.clone())
-                .unwrap_or_default(),
-        )
-    } else {
-        String::new()
-    };
-
     println!();
+}
 
-    // ── LLM ──
-    println!("{}", console::style("── LLM Provider ──").bold().dim());
-    let llm_base_url = prompt(
-        "Base URL",
-        &existing
-            .as_ref()
-            .and_then(|e| e.llm.as_ref())
-            .and_then(|l| l.base_url.clone())
-            .unwrap_or_else(|| "https://api.openai.com/v1".into()),
-    );
-    let llm_api_key = prompt(
-        "API key (optional, press enter to skip)",
-        &existing
-            .as_ref()
-            .and_then(|e| e.llm.as_ref())
-            .and_then(|l| l.api_key.clone())
-            .unwrap_or_default(),
-    );
-    let llm_model = prompt(
-        "Model",
-        &existing
-            .as_ref()
-            .and_then(|e| e.llm.as_ref())
-            .and_then(|l| l.model.clone())
-            .unwrap_or_else(|| "gpt-4".into()),
-    );
-
-    println!();
-
-    // ── Embedder ──
-    println!("{}", console::style("── Embedder Provider ──").bold().dim());
-    let emb_backend = {
-        let default_backend = existing
-            .as_ref()
-            .and_then(|e| e.embedder.as_ref())
-            .and_then(|l| l.backend.clone())
-            .unwrap_or_else(|| "local".into());
-        let default_idx = if default_backend == "http" { 1 } else { 0 };
-        let emb_backends = vec!["local", "http"];
-        let idx = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Embedding backend (local = on-device Candle, http = bring-your-own-key)")
-            .items(&emb_backends)
-            .default(default_idx)
-            .interact()?;
-        emb_backends[idx]
-    };
-    let (emb_base_url, emb_api_key, emb_model) = if emb_backend == "local" {
-        (
-            String::new(),
-            String::new(),
-            existing
-                .as_ref()
-                .and_then(|e| e.embedder.as_ref())
-                .and_then(|l| l.model.clone())
-                .unwrap_or_else(|| memayu_llm_client::local_embedder::DEFAULT_MODEL_ID.into()),
-        )
-    } else {
-        let base = prompt(
-            "Base URL",
-            &existing
-                .as_ref()
-                .and_then(|e| e.embedder.as_ref())
-                .and_then(|l| l.base_url.clone())
-                .unwrap_or_else(|| "https://api.openai.com/v1".into()),
-        );
-        let key = prompt(
-            "API key (optional, press enter to skip)",
-            &existing
-                .as_ref()
-                .and_then(|e| e.embedder.as_ref())
-                .and_then(|l| l.api_key.clone())
-                .unwrap_or_default(),
-        );
-        let model = prompt(
-            "Model",
-            &existing
-                .as_ref()
-                .and_then(|e| e.embedder.as_ref())
-                .and_then(|l| l.model.clone())
-                .unwrap_or_else(|| "text-embedding-3-small".into()),
-        );
-        (base, key, model)
-    };
-
-    println!();
-
-    // ── Server ──
-    println!("{}", console::style("── Server ──").bold().dim());
-    let bind_addr = prompt(
-        "Bind address",
-        &existing
-            .as_ref()
-            .and_then(|e| e.server.as_ref())
-            .and_then(|s| s.bind_addr.clone())
-            .unwrap_or_else(|| "127.0.0.1".into()),
-    );
-    let prev_port = existing
-        .as_ref()
-        .and_then(|e| e.server.as_ref())
-        .and_then(|s| s.port)
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "18080".into());
-    let port_str = prompt("Port", &prev_port);
-    let port: u16 = port_str.parse().unwrap_or(18080);
-
-    println!();
-
-    // ── Behavior ──
-    println!("{}", console::style("── Behavior ──").bold().dim());
-    let prev_sim = existing
-        .as_ref()
-        .and_then(|e| e.behavior.as_ref())
-        .and_then(|b| b.similarity_threshold)
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| "0.65".into());
-    let sim_str = prompt("Similarity threshold (0.0-1.0)", &prev_sim);
-    let similarity_threshold: f32 = sim_str.parse().unwrap_or(0.65);
-
-    let current_mode = existing
-        .as_ref()
-        .and_then(|e| e.behavior.as_ref())
-        .and_then(|b| b.extraction_mode.clone())
-        .unwrap_or_else(|| "llm".into());
-    let modes = vec!["llm", "raw"];
-    let mode_default_idx = match current_mode.as_str() {
-        "raw" => 1,
-        _ => 0,
-    };
-    let mode_idx = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Extraction mode")
-        .items(&modes)
-        .default(mode_default_idx)
-        .interact()?;
-    let extraction_mode = modes[mode_idx].to_string();
-
-    // ── Build ConfigFile and serialize ──
-    let cf = ConfigFile {
-        storage: Some(memayu_config::StorageConfigFile {
-            backend: backend.to_string(),
-            libsql_path: if libsql_path.is_empty() {
-                None
-            } else {
-                Some(libsql_path)
-            },
-            database_url: if database_url.is_empty() {
-                None
-            } else {
-                Some(database_url)
-            },
-        }),
-        llm: Some(memayu_config::ProviderConfigFile {
-            backend: Some("http".to_string()),
-            base_url: Some(llm_base_url),
-            api_key: if llm_api_key.is_empty() {
-                None
-            } else {
-                Some(llm_api_key)
-            },
-            model: Some(llm_model),
-        }),
-        embedder: Some(memayu_config::ProviderConfigFile {
-            backend: Some(emb_backend.to_string()),
-            base_url: if emb_base_url.is_empty() {
-                None
-            } else {
-                Some(emb_base_url)
-            },
-            api_key: if emb_api_key.is_empty() {
-                None
-            } else {
-                Some(emb_api_key)
-            },
-            model: Some(emb_model),
-        }),
-        server: Some(memayu_config::ServerConfigFile {
-            bind_addr: Some(bind_addr),
-            port: Some(port),
-        }),
-        behavior: Some(memayu_config::BehaviorConfigFile {
-            similarity_threshold: Some(similarity_threshold),
-            extraction_mode: Some(extraction_mode),
-        }),
-    };
-
-    let toml_str = toml::to_string_pretty(&cf)?;
-    let path = config_path();
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(&path, &toml_str)?;
-
+/// Print the local embedding model comparison table before the model picker.
+fn print_local_model_table() {
     println!();
     println!(
-        "{} Written to {}",
-        console::style("✔").green().bold(),
-        path.display()
+        "{} Local embedding models",
+        console::style("Model").bold().cyan()
     );
-    println!();
     println!(
-        "  {}",
-        console::style(
-            "Run 'memayu serve' to start the server, or 'memayu config show' to review."
-        )
-        .dim()
+        "  {:<38} {:>4} {:>8} {:>8} {:>9} | CPU / Lang",
+        "Name", "Dim", "fp32", "int8", "Min RAM"
     );
-
-    Ok(toml_str)
+    for m in LOCAL_MODELS {
+        println!(
+            "  {:<38} {:>4} {:>7}M {:>7}M {:>8}M | {} / {}",
+            m.name, m.dim, m.fp32_size_mb, m.int8_size_mb, m.min_ram_mb, m.cpu_notes, m.langs
+        );
+    }
+    println!();
 }

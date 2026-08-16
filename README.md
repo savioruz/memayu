@@ -62,6 +62,43 @@ docker run --rm -p 8080:8080 \
 
 ## Usage
 
+### CLI
+
+`memayu` with no subcommand starts the default frontend — the Ratatui TUI when
+compiled in, otherwise the web dashboard. In a headless or piped invocation
+(no TTY), it detects that a TUI cannot render and falls back to `serve` mode
+instead of hanging.
+
+First-time setup is a guided wizard:
+
+```bash
+memayu setup            # interactive CLI wizard (plain stdin/stdout)
+memayu setup --tui      # the same flow, rendered as a ratatui TUI
+```
+
+Both presenters ask the identical set of questions in the same order: device
+check, storage backend, embedder backend, extraction mode, admin email +
+password, and bind address/port. The first step probes the machine (OS, CPU
+architecture, RAM, free disk) and reports whether on-device embedding is
+viable. When it is, the "embedder backend" step offers `local` and, on choosing
+it, a picker among four bundled Candle models (all-MiniLM-L6-v2,
+bge-small-en-v1.5, paraphrase-multilingual-MiniLM-L12-v2, nomic-embed-text-v1.5)
+with their dimensions, sizes, memory/disk footprint, CPU notes, and supported
+languages. When local embedding is not viable (32-bit ARM, or too little
+RAM/disk), the `local` option is withheld and the HTTP embedder is used
+instead. On completion memayu writes `config.toml`, creates the admin account,
+and prints a fresh `mmyu_…` API key exactly once. The CLI wizard reads from
+plain stdin/stdout, so it also works with piped input (agent-friendly) and no
+TTY. If a config file already exists, the wizard pre-fills its values as
+defaults for re-configuration. In the TUI wizard, `Enter`/`Tab`/`→` advance to
+the next field (submitting the current step on the last field), `←` moves back
+to the previous field or step, `↑`/`↓` pick a select option, and `Esc`/`Ctrl-C`
+cancels.
+
+Other subcommands: `memayu config show|check`, `memayu add`, `memayu search`,
+`memayu list`, `memayu get`, `memayu delete`, `memayu doctor`, plus
+`memayu serve` (web, `web` feature) and `memayu mcp` (`mcp` feature).
+
 ### HTTP API
 
 All `/api/memories/*` routes require authentication via `x-api-key` header or session cookie.

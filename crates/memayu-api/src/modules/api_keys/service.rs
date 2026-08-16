@@ -3,7 +3,6 @@ use crate::infrastructure::db::DbClient;
 use crate::modules::api_keys::dto::{
     GenerateKeyRequest, GenerateKeyResponse, ListKeyResponse, ListKeysResponse,
 };
-use rand::Rng;
 use sha2::{Digest, Sha256};
 
 fn sha256_hex(s: &str) -> String {
@@ -24,6 +23,11 @@ pub async fn resolve(api_key: &str, db: &DbClient) -> Result<String, String> {
 }
 
 /// Generate a new API key for the given user.
+///
+/// The key format + hashing come from the shared
+/// [`memayu_identity::new_api_key`] generator so the terminal setup wizard and
+/// the web flow can never drift apart (#54). Only the insert happens here,
+/// through this crate's `DbClient`.
 pub async fn generate_key(
     db: &DbClient,
     user_id: &str,
@@ -34,27 +38,29 @@ pub async fn generate_key(
         return Err(ApiError::bad_request("label is required"));
     }
 
-    let mut rng = rand::rngs::OsRng;
-    let raw: [u8; 24] = rng.gen();
-    let raw_key = format!("mmyu_{}", hex::encode(raw));
-    let key_prefix = format!("mmyu_{}", hex::encode(&raw[..2]));
-    let key_hash = sha256_hex(&raw_key);
+    let material = memayu_identity::new_api_key();
     let id = uuid::Uuid::new_v4().to_string();
     let created = chrono::Utc::now().to_rfc3339();
 
-    db.insert_api_key(&id, user_id, label, &key_prefix, &key_hash)
-        .await
-        .map_err(|e| ApiError {
-            status: 500,
-            error: "internal_error".into(),
-            message: e,
-        })?;
+    db.insert_api_key(
+        &id,
+        user_id,
+        label,
+        &material.key_prefix,
+        &material.key_hash,
+    )
+    .await
+    .map_err(|e| ApiError {
+        status: 500,
+        error: "internal_error".into(),
+        message: e,
+    })?;
 
     Ok(GenerateKeyResponse {
-        key: raw_key,
+        key: material.key,
         id,
         label: label.to_string(),
-        key_prefix,
+        key_prefix: material.key_prefix,
         created_at: created,
     })
 }
