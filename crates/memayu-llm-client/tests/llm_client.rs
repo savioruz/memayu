@@ -46,6 +46,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let provider = HttpLlmProvider::new(ProviderConfig {
+            backend: memayu_config::EmbedderBackend::Http,
             base_url: format!("http://127.0.0.1:{port}"),
             api_key: Some("k".into()),
             model: "m".into(),

@@ -2,7 +2,22 @@
 name = "memayu-llm-client"
 version.workspace = true
 edition.workspace = true
-description = "Memayu OpenAI-compatible HTTP client for LLM extraction and embedding"
+description = "Memayu LLM/embedding providers: OpenAI-compatible HTTP client plus a local in-process Candle embedder"
+
+[features]
+# The local backend ships by default so the single-binary, zero-dependency
+# story holds (issue #18). Use `--no-default-features` to drop Candle for a
+# smaller, HTTP-only build.
+default = ["local-embedding"]
+# In-process, zero-dependency embedding via Candle (pure Rust). When enabled,
+# the "local" embedder backend is available and compiled into the binary.
+local-embedding = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:ureq",
+]
 
 [dependencies]
 memayu-core = { path = "../memayu-core" }
@@ -12,9 +27,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 async-trait = "0.1"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "rt", "sync"] }
+# Local (in-process) embedding backend. Pure-Rust Candle — no external C/C++
+# shared library, keeps the single-binary philosophy.
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
+tokenizers = { version = "0.22", optional = true }
+# Minimal blocking HTTP client used only to fetch model weights from Hugging
+# Face on first use. `hf-hub`'s sync API mishandles the relative `Location`
+# headers HF returns for small files, so we download directly.
+ureq = { version = "2", optional = true }
 
 [dev-dependencies]
+memayu-core = { path = "../memayu-core" }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 http-body-util = "0.1"

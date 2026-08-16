@@ -38,8 +38,46 @@ impl std::str::FromStr for StorageBackend {
     }
 }
 
+/// Where the embedding model runs.
+///
+/// - [`EmbedderBackend::Http`] is the default: an OpenAI-compatible remote
+///   endpoint (the legacy behavior, BYOK).
+/// - [`EmbedderBackend::Local`] runs a Candle-based model entirely in-process
+///   with no API key and no network call at inference time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedderBackend {
+    #[default]
+    Http,
+    Local,
+}
+
+impl std::fmt::Display for EmbedderBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmbedderBackend::Http => write!(f, "http"),
+            EmbedderBackend::Local => write!(f, "local"),
+        }
+    }
+}
+
+impl std::str::FromStr for EmbedderBackend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "http" => Ok(EmbedderBackend::Http),
+            "local" => Ok(EmbedderBackend::Local),
+            other => Err(format!(
+                "unknown embedder backend \"{other}\"; expected \"http\" or \"local\""
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProviderConfig {
+    #[serde(default)]
+    pub backend: EmbedderBackend,
     pub base_url: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -115,6 +153,9 @@ fn default_storage_backend_file() -> String {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProviderConfigFile {
+    /// Optional embedder backend: "http" (default) or "local". Ignored for the LLM.
+    #[serde(default)]
+    pub backend: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -182,6 +223,21 @@ pub fn config_path() -> PathBuf {
     }
     let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("~/.config"));
     base.join("memayu").join("config.toml")
+}
+
+/// Returns the directory used to cache downloaded embedding models.
+/// Resolution order:
+/// 1. `$MEMAYU_MODEL_DIR`
+/// 2. `$XDG_DATA_HOME/memayu/models`
+/// 3. `~/.local/share/memayu/models`
+///
+/// The directory is created on first use by the local embedder.
+pub fn model_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("MEMAYU_MODEL_DIR") {
+        return PathBuf::from(p);
+    }
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("~/.local/share"));
+    base.join("memayu").join("models")
 }
 
 /// Try to read and parse the config file at the canonical path.
@@ -307,12 +363,41 @@ impl Config {
         };
 
         // ── Embedder ──
-        let emb_base_url = env_required_or(
-            env,
-            file.embedder.as_ref().and_then(|l| l.base_url.as_deref()),
-            "MEMAYU_EMBEDDER_BASE_URL",
-            "embedder.base_url",
-        )?;
+        // Backend: "http" (default, BYOK) or "local" (in-process Candle model).
+        // A local backend needs no base_url or api_key.
+        let emb_backend: EmbedderBackend = env
+            .get("MEMAYU_EMBEDDER_BACKEND")
+            .map(|s| {
+                s.parse().map_err(|e| ConfigError::Invalid {
+                    var: "MEMAYU_EMBEDDER_BACKEND",
+                    value: s.clone(),
+                    detail: e,
+                })
+            })
+            .transpose()?
+            .unwrap_or_else(|| {
+                file.embedder
+                    .as_ref()
+                    .and_then(|l| l.backend.as_deref())
+                    .and_then(|b| b.parse().ok())
+                    .unwrap_or(EmbedderBackend::Http)
+            });
+
+        let emb_base_url = if emb_backend == EmbedderBackend::Local {
+            env_opt_or(
+                env,
+                file.embedder.as_ref().and_then(|l| l.base_url.as_deref()),
+                "MEMAYU_EMBEDDER_BASE_URL",
+            )
+            .unwrap_or_default()
+        } else {
+            env_required_or(
+                env,
+                file.embedder.as_ref().and_then(|l| l.base_url.as_deref()),
+                "MEMAYU_EMBEDDER_BASE_URL",
+                "embedder.base_url",
+            )?
+        };
         let emb_api_key = env_opt_or(
             env,
             file.embedder.as_ref().and_then(|l| l.api_key.as_deref()),
@@ -379,6 +464,7 @@ impl Config {
                 database_url: postgres_url,
             },
             llm: ProviderConfig {
+                backend: EmbedderBackend::Http,
                 base_url: if llm_base_url.is_empty() {
                     llm_base_url
                 } else {
@@ -388,7 +474,12 @@ impl Config {
                 model: llm_model,
             },
             embedder: ProviderConfig {
-                base_url: validate_url("MEMAYU_EMBEDDER_BASE_URL", emb_base_url)?,
+                backend: emb_backend,
+                base_url: if emb_backend == EmbedderBackend::Local {
+                    emb_base_url
+                } else {
+                    validate_url("MEMAYU_EMBEDDER_BASE_URL", emb_base_url)?
+                },
                 api_key: emb_api_key,
                 model: emb_model,
             },
@@ -416,11 +507,14 @@ impl Config {
                 msgs.push("llm.model: missing — set MEMAYU_LLM_MODEL".into());
             }
         }
-        if self.embedder.base_url.is_empty() {
+        if self.embedder.backend == EmbedderBackend::Http && self.embedder.base_url.is_empty() {
             msgs.push("embedder.base_url: missing — set MEMAYU_EMBEDDER_BASE_URL".into());
         }
         if self.embedder.model.is_empty() {
-            msgs.push("embedder.model: missing — set MEMAYU_EMBEDDER_MODEL".into());
+            msgs.push(
+                "embedder.model: missing — set MEMAYU_EMBEDDER_MODEL (HF model id for local backend)"
+                    .into(),
+            );
         }
         if let StorageBackend::Postgres = self.storage.backend {
             if self
@@ -526,11 +620,13 @@ fn cloud_config(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
             database_url: None,
         },
         llm: ProviderConfig {
+            backend: EmbedderBackend::Http,
             base_url: String::new(),
             api_key: None,
             model: String::new(),
         },
         embedder: ProviderConfig {
+            backend: EmbedderBackend::Http,
             base_url: String::new(),
             api_key: None,
             model: String::new(),
@@ -808,11 +904,13 @@ mod tests {
                 database_url: None,
             },
             llm: ProviderConfig {
+                backend: EmbedderBackend::Http,
                 base_url: String::new(),
                 api_key: None,
                 model: String::new(),
             },
             embedder: ProviderConfig {
+                backend: EmbedderBackend::Http,
                 base_url: String::new(),
                 api_key: None,
                 model: String::new(),

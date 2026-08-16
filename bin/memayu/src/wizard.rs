@@ -53,9 +53,25 @@ pub fn run_wizard() -> Result<String, Box<dyn std::error::Error>> {
 
     // ── Embedder ──
     println!("{}", console::style("── Embedder Provider ──").bold().dim());
-    let emb_base_url = prompt("Base URL", "https://api.openai.com/v1");
-    let emb_api_key = prompt("API key (optional, press enter to skip)", "");
-    let emb_model = prompt("Model", "text-embedding-3-small");
+    let emb_backends = vec!["local", "http"];
+    let emb_backend_idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Embedding backend (local = on-device Candle, http = bring-your-own-key)")
+        .items(&emb_backends)
+        .default(0)
+        .interact()?;
+    let emb_backend = emb_backends[emb_backend_idx];
+    let (emb_base_url, emb_api_key, emb_model) = if emb_backend == "local" {
+        (
+            String::new(),
+            String::new(),
+            memayu_llm_client::local_embedder::DEFAULT_MODEL_ID.to_string(),
+        )
+    } else {
+        let base = prompt("Base URL", "https://api.openai.com/v1");
+        let key = prompt("API key (optional, press enter to skip)", "");
+        let model = prompt("Model", "text-embedding-3-small");
+        (base, key, model)
+    };
 
     println!();
 
@@ -96,6 +112,7 @@ pub fn run_wizard() -> Result<String, Box<dyn std::error::Error>> {
             },
         }),
         llm: Some(memayu_config::ProviderConfigFile {
+            backend: Some("http".to_string()),
             base_url: Some(llm_base_url),
             api_key: if llm_api_key.is_empty() {
                 None
@@ -105,7 +122,12 @@ pub fn run_wizard() -> Result<String, Box<dyn std::error::Error>> {
             model: Some(llm_model),
         }),
         embedder: Some(memayu_config::ProviderConfigFile {
-            base_url: Some(emb_base_url),
+            backend: Some(emb_backend.to_string()),
+            base_url: if emb_base_url.is_empty() {
+                None
+            } else {
+                Some(emb_base_url)
+            },
             api_key: if emb_api_key.is_empty() {
                 None
             } else {
@@ -245,30 +267,58 @@ pub fn run_wizard_preseed(skip_intro: bool) -> Result<String, Box<dyn std::error
 
     // ── Embedder ──
     println!("{}", console::style("── Embedder Provider ──").bold().dim());
-    let emb_base_url = prompt(
-        "Base URL",
-        &existing
+    let emb_backend = {
+        let default_backend = existing
             .as_ref()
             .and_then(|e| e.embedder.as_ref())
-            .and_then(|l| l.base_url.clone())
-            .unwrap_or_else(|| "https://api.openai.com/v1".into()),
-    );
-    let emb_api_key = prompt(
-        "API key (optional, press enter to skip)",
-        &existing
-            .as_ref()
-            .and_then(|e| e.embedder.as_ref())
-            .and_then(|l| l.api_key.clone())
-            .unwrap_or_default(),
-    );
-    let emb_model = prompt(
-        "Model",
-        &existing
-            .as_ref()
-            .and_then(|e| e.embedder.as_ref())
-            .and_then(|l| l.model.clone())
-            .unwrap_or_else(|| "text-embedding-3-small".into()),
-    );
+            .and_then(|l| l.backend.clone())
+            .unwrap_or_else(|| "local".into());
+        let default_idx = if default_backend == "http" { 1 } else { 0 };
+        let emb_backends = vec!["local", "http"];
+        let idx = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Embedding backend (local = on-device Candle, http = bring-your-own-key)")
+            .items(&emb_backends)
+            .default(default_idx)
+            .interact()?;
+        emb_backends[idx]
+    };
+    let (emb_base_url, emb_api_key, emb_model) = if emb_backend == "local" {
+        (
+            String::new(),
+            String::new(),
+            existing
+                .as_ref()
+                .and_then(|e| e.embedder.as_ref())
+                .and_then(|l| l.model.clone())
+                .unwrap_or_else(|| memayu_llm_client::local_embedder::DEFAULT_MODEL_ID.into()),
+        )
+    } else {
+        let base = prompt(
+            "Base URL",
+            &existing
+                .as_ref()
+                .and_then(|e| e.embedder.as_ref())
+                .and_then(|l| l.base_url.clone())
+                .unwrap_or_else(|| "https://api.openai.com/v1".into()),
+        );
+        let key = prompt(
+            "API key (optional, press enter to skip)",
+            &existing
+                .as_ref()
+                .and_then(|e| e.embedder.as_ref())
+                .and_then(|l| l.api_key.clone())
+                .unwrap_or_default(),
+        );
+        let model = prompt(
+            "Model",
+            &existing
+                .as_ref()
+                .and_then(|e| e.embedder.as_ref())
+                .and_then(|l| l.model.clone())
+                .unwrap_or_else(|| "text-embedding-3-small".into()),
+        );
+        (base, key, model)
+    };
 
     println!();
 
@@ -337,6 +387,7 @@ pub fn run_wizard_preseed(skip_intro: bool) -> Result<String, Box<dyn std::error
             },
         }),
         llm: Some(memayu_config::ProviderConfigFile {
+            backend: Some("http".to_string()),
             base_url: Some(llm_base_url),
             api_key: if llm_api_key.is_empty() {
                 None
@@ -346,7 +397,12 @@ pub fn run_wizard_preseed(skip_intro: bool) -> Result<String, Box<dyn std::error
             model: Some(llm_model),
         }),
         embedder: Some(memayu_config::ProviderConfigFile {
-            base_url: Some(emb_base_url),
+            backend: Some(emb_backend.to_string()),
+            base_url: if emb_base_url.is_empty() {
+                None
+            } else {
+                Some(emb_base_url)
+            },
             api_key: if emb_api_key.is_empty() {
                 None
             } else {

@@ -72,15 +72,30 @@ pub async fn cmd_doctor(config: &Config) -> i32 {
     }
 
     println!("\n{} Checking embedder", section("embedder"));
-    let (passed, warned) = check_provider(
-        "embedder",
-        &config.embedder.base_url,
-        config.embedder.api_key.as_deref(),
-        &config.embedder.model,
-    )
-    .await;
-    ok &= passed;
-    warnings += usize::from(warned);
+    if memayu_llm_client::is_local_backend(&config.embedder) {
+        // On-device backend: no network endpoint to probe. Confirm the model
+        // cache location (the model is downloaded on first embed).
+        let model_id = if config.embedder.model.is_empty() {
+            memayu_llm_client::local_embedder::DEFAULT_MODEL_ID.to_string()
+        } else {
+            config.embedder.model.clone()
+        };
+        println!(
+            "  {} on-device backend (local Candle), model: {model_id}",
+            style("✔").green().bold()
+        );
+        println!("    model dir: {}", memayu_config::model_dir().display());
+    } else {
+        let (passed, warned) = check_provider(
+            "embedder",
+            &config.embedder.base_url,
+            config.embedder.api_key.as_deref(),
+            &config.embedder.model,
+        )
+        .await;
+        ok &= passed;
+        warnings += usize::from(warned);
+    }
 
     // ── Summary ──
     println!();
@@ -128,8 +143,8 @@ fn print_config(config: &Config) {
     );
     println!("    llm key:   {}", redact(&config.llm.api_key));
     println!(
-        "    embedder:  {} ({})",
-        config.embedder.base_url, config.embedder.model
+        "    embedder:  {} ({}) [{}]",
+        config.embedder.base_url, config.embedder.model, config.embedder.backend
     );
     println!("    emb key:   {}", redact(&config.embedder.api_key));
     if let Some(d) = config.dimension {
