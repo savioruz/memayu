@@ -50,6 +50,73 @@ fn start_mock_embedder() -> u16 {
     port
 }
 
+/// Like [`start_mock_embedder`] but derives a distinct embedding from each
+/// request's full body. Used by batch tests where every item must get its own
+/// vector so the storage layer doesn't treat them as duplicates and merge them.
+fn start_distinct_embedder() -> u16 {
+    use std::hash::{Hash, Hasher};
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind distinct embedder");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            // Read the full request: headers plus Content-Length bytes of body.
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 2048];
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let header = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                            let content_length = header
+                                .lines()
+                                .find_map(|line| {
+                                    let mut parts = line.splitn(2, ':');
+                                    if parts
+                                        .next()
+                                        .map(|k| k.trim().eq_ignore_ascii_case("content-length"))
+                                        == Some(true)
+                                    {
+                                        parts.next()?.trim().parse::<usize>().ok()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= header_end + 4 + content_length {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            buf.hash(&mut h);
+            let v = h.finish();
+            let emb = [
+                ((v & 0xffff) as f32) / 65535.0,
+                (((v >> 16) & 0xffff) as f32) / 65535.0,
+                (((v >> 32) & 0xffff) as f32) / 65535.0,
+            ];
+            let body = format!(
+                r#"{{"data":[{{"embedding":[{:.6},{:.6},{:.6}]}}]}}"#,
+                emb[0], emb[1], emb[2]
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    port
+}
+
 /// A temp libsql db path unique per test process.
 fn temp_db_path() -> std::path::PathBuf {
     static COUNTER: AtomicU16 = AtomicU16::new(0);
@@ -228,4 +295,61 @@ fn list_exposes_paging_contract() {
     let obj: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(obj["memories"].as_array().unwrap().len(), 0);
     assert_eq!(obj["total"].as_u64(), Some(0));
+}
+
+#[test]
+fn add_batch_stores_all_items() {
+    let port = start_distinct_embedder();
+    let db = temp_db_path();
+    let batch = temp_db_path().with_extension("batch.jsonl");
+    std::fs::write(
+        &batch,
+        concat!(
+            "{\"content\":\"alpha\",\"metadata\":{\"source\":\"batch\"}}\n",
+            "{\"content\":\"beta\"}\n",
+            "{\"content\":\"gamma\"}\n",
+        ),
+    )
+    .unwrap();
+
+    let (code, stdout) = run_memayu(&["add", "--batch", batch.to_str().unwrap()], port, &db);
+    assert_eq!(code, 0, "batch add should succeed");
+    assert_eq!(stdout.matches("stored:").count(), 3);
+    assert!(stdout.contains("added: 3 memory(ies)"), "stdout: {stdout}");
+
+    // All three are persisted.
+    let (code, stdout) = run_memayu(&["list", "--json"], port, &db);
+    assert_eq!(code, 0);
+    let obj: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let contents: Vec<String> = obj["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap().to_string())
+        .collect();
+    for c in ["alpha", "beta", "gamma"] {
+        assert!(
+            contents.iter().any(|x| x == c),
+            "missing {c} in {contents:?}"
+        );
+    }
+}
+
+#[test]
+fn add_batch_reports_partial_failures() {
+    let port = start_distinct_embedder();
+    let db = temp_db_path();
+    let batch = temp_db_path().with_extension("batch.jsonl");
+    std::fs::write(&batch, "{\"content\":\"ok\"}\n{\"content\":\"   \"}\n").unwrap();
+
+    let (code, stdout, stderr) =
+        run_memayu_full(&["add", "--batch", batch.to_str().unwrap()], port, &db);
+    // The valid item is stored, but the blank one fails and we exit non-zero.
+    assert_ne!(code, 0, "partial failure should exit non-zero");
+    assert_eq!(stdout.matches("stored:").count(), 1);
+    assert!(
+        stderr.contains("failed: memory content is required"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("1 item(s) failed"), "stderr: {stderr}");
 }

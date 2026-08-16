@@ -15,6 +15,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
     info(title = "Memayu API", version = "0.1.0"),
     paths(
         handlers::memory::add_memory,
+        handlers::memory::add_memories_batch,
         handlers::memory::search_memory,
         handlers::memory::list_memories,
         handlers::memory::delete_memory,
@@ -23,6 +24,10 @@ use utoipa_axum::{router::OpenApiRouter, routes};
     components(schemas(
         crate::modules::memory::dto::AddMemoryRequest,
         crate::modules::memory::dto::AddMemoryResponse,
+        crate::modules::memory::dto::AddMemoryItem,
+        crate::modules::memory::dto::AddMemoriesBatchRequest,
+        crate::modules::memory::dto::AddMemoriesBatchResponse,
+        crate::modules::memory::dto::BatchMemoryError,
         crate::modules::memory::dto::SearchMemoryRequest,
         crate::modules::memory::dto::SearchMemoryResponse,
         crate::modules::memory::dto::SearchResult,
@@ -74,6 +79,7 @@ pub fn build(
     let (memory_routes, openapi_spec) = {
         let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
             .routes(routes!(handlers::memory::add_memory))
+            .routes(routes!(handlers::memory::add_memories_batch))
             .routes(routes!(handlers::memory::search_memory))
             .routes(routes!(handlers::memory::list_memories))
             .routes(routes!(handlers::memory::delete_memory))

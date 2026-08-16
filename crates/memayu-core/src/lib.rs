@@ -15,4 +15,4 @@ pub use ports::{
     EmbedError, EmbedderProvider, ExtractionDecision, ExtractionMode, ExtractionResult, LlmError,
     LlmProvider, Message, Metadata, StorageError, StorageProvider,
 };
-pub use service::{AddMemoryOutcome, MemoryService};
+pub use service::{AddMemoryOutcome, BatchItemResult, BatchMemory, MemoryService};

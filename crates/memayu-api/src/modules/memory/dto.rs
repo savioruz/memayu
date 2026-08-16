@@ -10,6 +10,39 @@ pub struct AddMemoryRequest {
     pub metadata: Metadata,
 }
 
+/// One memory within a batch add request.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AddMemoryItem {
+    pub content: String,
+    #[serde(default)]
+    pub metadata: Metadata,
+}
+
+/// Batch add request — `{"memories": [{"content": ..., "metadata": ...}, ...]}`.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AddMemoriesBatchRequest {
+    pub memories: Vec<AddMemoryItem>,
+}
+
+/// A single failed item within a batch response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BatchMemoryError {
+    /// Zero-based index of the failed item in the request's `memories` array.
+    pub index: usize,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AddMemoriesBatchResponse {
+    pub status: String,
+    /// Number of memories actually stored (successes).
+    pub added: usize,
+    /// Memory ids of the successfully stored items, in request order.
+    pub memory_ids: Vec<String>,
+    /// Per-item failures. Empty when every item was stored.
+    pub errors: Vec<BatchMemoryError>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AddMemoryResponse {
     pub status: String,
