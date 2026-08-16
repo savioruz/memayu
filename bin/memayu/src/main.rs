@@ -1,6 +1,7 @@
 mod cli;
 mod doctor;
 mod service;
+mod setup_flow;
 #[cfg(feature = "tui")]
 mod tui;
 #[cfg(feature = "tui")]
@@ -78,7 +79,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cmd_default(config).await?;
         }
         "setup" => {
-            wizard::run_wizard_preseed(true)?;
+            // #54: default is the CLI-interactive wizard (dialoguer, plain
+            // stdin/stdout, agent-friendly). `--tui` opts into the ratatui
+            // presentation of the identical flow.
+            let flag = args.next().unwrap_or_default();
+            match flag.as_str() {
+                "--tui" => {
+                    #[cfg(feature = "tui")]
+                    {
+                        tui_setup::run_full_tui_setup().await?;
+                    }
+                    #[cfg(not(feature = "tui"))]
+                    {
+                        eprintln!(
+                            "{} error: `setup --tui` requires the 'tui' feature (rebuild with --features tui)",
+                            console::style("✘").red().bold()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                _ => {
+                    wizard::run_cli_setup(true).await?;
+                }
+            }
         }
         "config" => {
             let sub = args.next().unwrap_or_else(|| "show".into());
@@ -134,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!();
                         println!("{}", console::style("Starting setup wizard…").cyan());
                         println!();
-                        wizard::run_wizard()?;
+                        wizard::run_cli_setup(false).await?;
                         println!();
                         println!("{}", console::style("Starting with new config…").cyan());
                         let config = Config::load()?;

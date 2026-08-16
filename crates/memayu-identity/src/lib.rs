@@ -21,8 +21,13 @@
 //!   placeholder rows (e.g. `"default"`) to the admin account.
 //! - [`bootstrap`] combines the two: resolve the admin and backfill in one
 //!   call, which is what the TUI and local MCP frontends run at startup.
+//! - [`generate_api_key`] creates a `mmyu_…` API key (storing only its hash),
+//!   the shared generator used by both the terminal setup wizard and the web
+//!   `/api/keys` flow.
 
 use memayu_config::{StorageBackend, StorageConfig};
+use rand::Rng;
+use sha2::Digest;
 use thiserror::Error;
 
 /// Errors produced by identity resolution and admin account creation.
@@ -301,6 +306,153 @@ async fn create_admin_postgres(
     .await
     .map_err(|e| IdentityError::Db(format!("create admin: {e}")))?;
     Ok(id)
+}
+
+// ── API keys ──
+
+/// A freshly generated API key. Only the raw `key` is ever shown to the user;
+/// the database stores only its hash plus a `key_prefix` for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedApiKey {
+    pub key: String,
+    pub id: String,
+    pub key_prefix: String,
+}
+
+/// The material for a freshly generated API key, before any DB insert.
+/// [`ApiKeyMaterial::key_hash`] is what gets stored; [`ApiKeyMaterial::key`]
+/// (the full raw key) is shown to the user exactly once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyMaterial {
+    pub key: String,
+    pub key_prefix: String,
+    pub key_hash: String,
+}
+
+fn sha256_hex(s: &str) -> String {
+    let mut h = sha2::Sha256::new();
+    h.update(s.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Generate a new `mmyu_…` API key and its stored hash. Pure; no I/O.
+///
+/// This is the single source of truth for the key format (#54), shared by the
+/// terminal setup wizard (via [`generate_api_key`]) and the web `/api/keys`
+/// flow so the two never drift apart.
+pub fn new_api_key() -> ApiKeyMaterial {
+    let mut rng = rand::rngs::OsRng;
+    let raw: [u8; 24] = rng.gen();
+    let key = format!("mmyu_{}", hex::encode(raw));
+    let key_prefix = format!("mmyu_{}", hex::encode(&raw[..2]));
+    let key_hash = sha256_hex(&key);
+    ApiKeyMaterial {
+        key,
+        key_prefix,
+        key_hash,
+    }
+}
+
+/// Generate a new `mmyu_…` API key owned by `user_id`, storing only its hash.
+///
+/// This is the shared, transport-agnostic key generator that both the terminal
+/// setup wizard and the web `/api/keys` flow use, so there is one source of
+/// truth for the key format (#54). The `api_keys` table is created on first use
+/// (same DDL as `memayu-api`). The raw key is returned exactly once.
+pub async fn generate_api_key(
+    config: &StorageConfig,
+    user_id: &str,
+    label: &str,
+) -> Result<GeneratedApiKey, IdentityError> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(IdentityError::Validation("label is required"));
+    }
+    let material = new_api_key();
+    let id = uuid::Uuid::new_v4().to_string();
+    let created = chrono::Utc::now().to_rfc3339();
+
+    match config.backend {
+        StorageBackend::Libsql => {
+            let conn = open_libsql(config).await?;
+            create_api_keys_table_libsql(&conn).await?;
+            conn.execute(
+                "INSERT INTO api_keys (id, user_id, label, key_prefix, key_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    id.as_str(),
+                    user_id,
+                    label,
+                    material.key_prefix.as_str(),
+                    material.key_hash.as_str(),
+                    created.as_str(),
+                ),
+            )
+            .await
+            .map_err(|e| IdentityError::Db(format!("insert api_key: {e}")))?;
+        }
+        StorageBackend::Postgres => {
+            let pool = open_postgres(config).await?;
+            create_api_keys_table_postgres(&pool).await?;
+            sqlx::query(
+                "INSERT INTO api_keys (id, user_id, label, key_prefix, key_hash, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(id.as_str())
+            .bind(user_id)
+            .bind(label)
+            .bind(material.key_prefix.as_str())
+            .bind(material.key_hash.as_str())
+            .bind(created.as_str())
+            .execute(&pool)
+            .await
+            .map_err(|e| IdentityError::Db(format!("insert api_key: {e}")))?;
+        }
+    }
+
+    Ok(GeneratedApiKey {
+        key: material.key,
+        id,
+        key_prefix: material.key_prefix,
+    })
+}
+
+async fn create_api_keys_table_libsql(conn: &libsql::Connection) -> Result<(), IdentityError> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS api_keys (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            key_hash TEXT NOT NULL,
+            key_prefix TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            last_used_at TEXT
+        )",
+        (),
+    )
+    .await
+    .map_err(|e| IdentityError::Db(format!("create api_keys table: {e}")))?;
+    Ok(())
+}
+
+async fn create_api_keys_table_postgres(
+    pool: &sqlx::Pool<sqlx::Postgres>,
+) -> Result<(), IdentityError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS api_keys (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            key_hash TEXT NOT NULL,
+            key_prefix TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            last_used_at TEXT
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| IdentityError::Db(format!("create api_keys table: {e}")))?;
+    Ok(())
 }
 
 // ── users-table helpers ──
@@ -756,5 +908,65 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, IdentityError::SetupAlreadyCompleted);
+    }
+
+    // ── generate_api_key ──
+
+    #[tokio::test]
+    async fn generate_api_key_returns_raw_key_and_stores_hash() {
+        let path = temp_db();
+        let config = config_for(&path);
+        let admin = create_admin_account(
+            &config,
+            "admin@example.com",
+            "Correct-Horse-Battery-Staple-42!",
+            "Correct-Horse-Battery-Staple-42!",
+        )
+        .await
+        .unwrap();
+
+        let generated = generate_api_key(&config, &admin, "default").await.unwrap();
+
+        // Key format + prefix, exactly like the web flow.
+        assert!(generated.key.starts_with("mmyu_"));
+        assert_eq!(generated.key_prefix, generated.key[..9].to_string());
+        assert_eq!(generated.key.len(), 5 + 48); // "mmyu_" + 24 bytes hex
+
+        // Only the hash is stored, not the raw key.
+        let conn = libsql::Builder::new_local(path.display().to_string())
+            .build()
+            .await
+            .unwrap()
+            .connect()
+            .unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT user_id, label, key_hash, key_prefix FROM api_keys WHERE id = ?1",
+                vec![generated.id.as_str()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), admin);
+        assert_eq!(row.get::<String>(1).unwrap(), "default");
+        assert_eq!(row.get::<String>(2).unwrap(), sha256_hex(&generated.key));
+        assert_eq!(row.get::<String>(3).unwrap(), generated.key_prefix);
+    }
+
+    #[tokio::test]
+    async fn generate_api_key_rejects_empty_label() {
+        let path = temp_db();
+        let config = config_for(&path);
+        let admin = create_admin_account(
+            &config,
+            "admin@example.com",
+            "Correct-Horse-Battery-Staple-42!",
+            "Correct-Horse-Battery-Staple-42!",
+        )
+        .await
+        .unwrap();
+
+        let err = generate_api_key(&config, &admin, "   ").await.unwrap_err();
+        assert_eq!(err, IdentityError::Validation("label is required"));
     }
 }
