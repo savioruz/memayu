@@ -97,7 +97,7 @@ fn run_doctor(
             format!("http://127.0.0.1:{port}"),
         )
         .env("MEMAYU_EMBEDDER_MODEL", "test-embed")
-        .env("MEMAYU_EMBEDDING_DIM", "3")
+        .env("MEMAYU_EMBEDDER_DIM", "3")
         .env("MEMAYU_LIBSQL_PATH", db)
         .env("MEMAYU_CONFIG", db.with_extension("toml"))
         .env_remove("MEMAYU_API_URL");
@@ -126,7 +126,7 @@ fn prime_schema(port: u16, db: &std::path::Path) {
             format!("http://127.0.0.1:{port}"),
         )
         .env("MEMAYU_EMBEDDER_MODEL", "test-embed")
-        .env("MEMAYU_EMBEDDING_DIM", "3")
+        .env("MEMAYU_EMBEDDER_DIM", "3")
         .env("MEMAYU_LIBSQL_PATH", db)
         .env("MEMAYU_CONFIG", db.with_extension("toml"))
         .env_remove("MEMAYU_API_URL")
@@ -189,7 +189,7 @@ fn doctor_dimension_mismatch_fails() {
     let db = temp_db_path();
     prime_schema(port, &db); // stores dimension 3
                              // Run doctor with a conflicting configured dimension.
-    let (code, stdout, _) = run_doctor(port, &db, &[("MEMAYU_EMBEDDING_DIM", "8")]);
+    let (code, stdout, _) = run_doctor(port, &db, &[("MEMAYU_EMBEDDER_DIM", "8")]);
     assert_eq!(code, 1, "dimension mismatch must fail doctor");
     assert!(
         stdout.contains("configured dimension 8 differs from stored 3"),

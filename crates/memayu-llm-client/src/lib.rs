@@ -27,7 +27,7 @@ pub fn is_local_backend(cfg: &ProviderConfig) -> bool {
 #[cfg(feature = "local-embedding")]
 pub fn build_embedder(cfg: &ProviderConfig) -> Arc<dyn EmbedderProvider> {
     match cfg.backend {
-        EmbedderBackend::Http => Arc::new(HttpEmbedderProvider::new(cfg.clone())),
+        EmbedderBackend::Remote => Arc::new(HttpEmbedderProvider::new(cfg.clone())),
         EmbedderBackend::Local => {
             let model_id = if cfg.model.is_empty() {
                 local_embedder::DEFAULT_MODEL_ID.to_string()

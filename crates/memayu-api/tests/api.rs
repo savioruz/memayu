@@ -163,7 +163,7 @@ mod tests {
 
     fn test_config() -> ProviderConfig {
         ProviderConfig {
-            backend: EmbedderBackend::Http,
+            backend: EmbedderBackend::Remote,
             base_url: "http://localhost:11434".into(),
             api_key: None,
             model: "test-model".into(),

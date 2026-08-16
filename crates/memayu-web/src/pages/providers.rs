@@ -25,7 +25,7 @@ fn provider_card(
             fieldset class="fieldset" {
                 label class="label" { span { "Backend" } }
                 select name="backend" class="select w-full" {
-                    option value="http" selected=(cfg.backend == EmbedderBackend::Http) {
+                    option value="remote" selected=(cfg.backend == EmbedderBackend::Remote) {
                         "HTTP (remote OpenAI-compatible API)"
                     }
                     option value="local" selected=(cfg.backend == EmbedderBackend::Local) {
@@ -136,7 +136,7 @@ pub async fn post_providers(
             .as_deref()
             .and_then(|b| b.parse().ok())
             .unwrap_or_else(|| registry.embedder().backend),
-        _ => EmbedderBackend::Http,
+        _ => EmbedderBackend::Remote,
     };
     let new_config = ProviderConfig {
         backend,

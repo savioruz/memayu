@@ -1,0 +1,15 @@
+[package]
+name = "memayu-setup"
+version.workspace = true
+edition.workspace = true
+description = "Shared first-run setup flow (model + catalog + finalize) reused by the CLI, TUI, and web setup wizards"
+
+[dependencies]
+memayu-config = { path = "../memayu-config" }
+memayu-llm-client = { path = "../memayu-llm-client" }
+memayu-identity = { path = "../memayu-identity" }
+sysinfo = "0.30"
+toml = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

@@ -23,7 +23,7 @@ use ratatui::{
 };
 use std::time::Duration;
 
-use crate::setup_flow::{
+use memayu_setup::{
     check_device, finalize, fmt_bytes, fmt_cpu, preseed, step_active, step_title, DeviceReport,
     SetupAnswers, SetupResult, SetupStep, DEFAULT_MODEL_INDEX, LOCAL_MODELS, LOCAL_MODEL_NAMES,
     SETUP_STEPS,
@@ -335,18 +335,18 @@ fn local_model_set(a: &mut SetupAnswers, idx: usize) {
 fn embedder_backend_field(a: &SetupAnswers) -> SelectField {
     if a.device.local_supported {
         SelectField {
-            label: "Embedding backend (local = on-device Candle, http = bring-your-own-key)",
-            options: &["local", "http"],
-            getter: |x| if x.embedder_backend == "http" { 1 } else { 0 },
-            setter: |x, v| x.embedder_backend = if v == 1 { "http" } else { "local" }.to_string(),
+            label: "Embedding backend (local = on-device Candle, remote = bring-your-own-key)",
+            options: &["local", "remote"],
+            getter: |x| if x.embedder_backend == "remote" { 1 } else { 0 },
+            setter: |x, v| x.embedder_backend = if v == 1 { "remote" } else { "local" }.to_string(),
         }
     } else {
-        // Local is not viable: only http, forced on commit.
+        // Local is not viable: only remote, forced on commit.
         SelectField {
-            label: "Embedding backend (local is not supported on this device, so http only)",
-            options: &["http"],
+            label: "Embedding backend (local is not supported on this device, so remote only)",
+            options: &["remote"],
             getter: |_| 0,
-            setter: |x, _| x.embedder_backend = "http".to_string(),
+            setter: |x, _| x.embedder_backend = "remote".to_string(),
         }
     }
 }

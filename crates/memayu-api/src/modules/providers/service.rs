@@ -50,11 +50,11 @@ pub async fn load_registry(
         let cfg = ProviderConfig {
             // A DB row stores only the HTTP triple; keep the config-selected
             // backend (e.g. local Candle) for the embedder so a config-driven
-            // local install survives DB rows. The LLM is always HTTP.
+            // local install survives DB rows. The LLM is always remote.
             backend: if provider == "embedder" {
                 fallback_emb_backend
             } else {
-                EmbedderBackend::Http
+                EmbedderBackend::Remote
             },
             base_url,
             api_key: Some(api_key),

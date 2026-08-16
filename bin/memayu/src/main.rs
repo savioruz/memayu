@@ -1,7 +1,6 @@
 mod cli;
 mod doctor;
 mod service;
-mod setup_flow;
 #[cfg(feature = "tui")]
 mod tui;
 #[cfg(feature = "tui")]
