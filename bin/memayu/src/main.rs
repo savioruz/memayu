@@ -13,6 +13,8 @@ use memayu_config::StorageBackend;
 use memayu_config::{config_path, Config};
 #[cfg(feature = "web")]
 use memayu_core::MemoryService;
+#[cfg(feature = "web")]
+use std::io::IsTerminal;
 #[cfg(any(feature = "web", feature = "mcp"))]
 use std::sync::Arc;
 
@@ -135,6 +137,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "auto" | "" => {
             // No subcommand: default frontend is the TUI when it is compiled in,
             // otherwise the web dashboard.
+            //
+            // #45: if there is no TTY (a headless/piped invocation), the TUI
+            // cannot render — instead of hanging, fall back to serve mode.
+            #[cfg(feature = "web")]
+            let headless = !std::io::stdin().is_terminal() && !std::io::stdout().is_terminal();
+
+            #[cfg(feature = "web")]
+            if headless {
+                eprintln!(
+                    "{} No TTY detected; falling back to serve mode",
+                    console::style("→").yellow()
+                );
+                match Config::load() {
+                    Ok(config) => {
+                        cmd_serve(config).await?;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} No valid config in headless mode: {e}",
+                            console::style("✘").red().bold()
+                        );
+                        eprintln!(
+                            "{} hint: run `memayu setup` (works without a TTY) or set the MEMAYU_* env vars",
+                            console::style("→").yellow()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             let cp = config_path();
             if cp.exists() {
                 let config = Config::load()?;
