@@ -74,19 +74,71 @@ fn provider_card(
     }
 }
 
-pub async fn get_providers(
+/// Full-width card for editing the DB-authoritative extraction mode. Saved
+/// through the same providers form; takes effect on the next server start.
+fn extraction_card(mode: &str) -> maud::Markup {
+    maud::html! {
+        div class="card bg-base-100 shadow-sm" {
+            div class="card-body" {
+                h3 class="card-title text-lg" { "Memory Extraction Mode" }
+                form method="post" action="/providers" class="space-y-4 mt-2" {
+                    input type="hidden" name="provider" value="extraction_mode";
+                    fieldset class="fieldset" {
+                        label class="label" { span { "Extraction Mode" } }
+                        select name="extraction_mode" class="select w-full" {
+                            option value="llm" selected=(mode == "llm") {
+                                "LLM Extraction (structured facts & insights)"
+                            }
+                            option value="raw" selected=(mode == "raw") {
+                                "Raw Text Mode (store chunks verbatim)"
+                            }
+                        }
+                        p class="text-xs text-base-content/50 mt-1" {
+                            "Controls how memories are extracted. Takes effect on the next server start."
+                        }
+                    }
+                    button type="submit" class="btn btn-primary" { "Save" }
+                }
+            }
+        }
+    }
+}
+
+/// Render the full providers/settings page. `msg` is an optional success alert.
+async fn render_config(
     user: CurrentUser,
-    State(registry): State<ConfigRegistry>,
+    registry: ConfigRegistry,
+    services: WebServices,
+    msg: &str,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let llm = registry.llm();
     let embedder = registry.embedder();
+    let mode = services
+        .get_extraction_mode()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .unwrap_or_else(|| "llm".into());
     let llm_has_key = llm.api_key.as_deref().is_some_and(|k| !k.is_empty());
     let emb_has_key = embedder.api_key.as_deref().is_some_and(|k| !k.is_empty());
     let body = maud::html! {
+        @if !msg.is_empty() {
+            div class="alert alert-success mt-4 mb-4" role="alert" x-data="{ open: true }" x-show="open" {
+                svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-5 w-5" fill="none" viewBox="0 0 24 24" {
+                    path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" {}
+                }
+                span class="flex-1" { (msg) }
+                button type="button" class="alert-close" x-on:click="open = false" aria-label="Close alert" {
+                    svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" {
+                        path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" {}
+                    }
+                }
+            }
+        }
         div class="grid grid-cols-1 md:grid-cols-2 gap-6" {
             (provider_card("llm", "LLM (extraction)", &llm, llm_has_key, false))
             (provider_card("embedder", "Embedder", &embedder, emb_has_key, true))
         }
+        div class="mt-6" { (extraction_card(&mode)) }
     };
     Ok(Html(components::render_page(
         "providers",
@@ -97,6 +149,14 @@ pub async fn get_providers(
     )))
 }
 
+pub async fn get_providers(
+    user: CurrentUser,
+    State(registry): State<ConfigRegistry>,
+    State(services): State<WebServices>,
+) -> Result<Html<String>, (StatusCode, String)> {
+    render_config(user, registry, services, "").await
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ProviderForm {
     pub provider: String,
@@ -104,6 +164,8 @@ pub struct ProviderForm {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default)]
+    pub extraction_mode: Option<String>,
 }
 
 pub async fn post_providers(
@@ -112,11 +174,27 @@ pub async fn post_providers(
     State(services): State<WebServices>,
     Form(form): Form<ProviderForm>,
 ) -> Result<Html<String>, (StatusCode, String)> {
+    // Extraction-mode-only form post: validate and persist, then re-render.
+    if form.provider == "extraction_mode" {
+        let mode = form.extraction_mode.clone().unwrap_or_else(|| "llm".into());
+        if mode != "llm" && mode != "raw" {
+            return Err((StatusCode::BAD_REQUEST, "invalid extraction_mode".into()));
+        }
+        services
+            .set_extraction_mode(&mode)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let _ = services
+            .request_log_insert("POST", "/providers", 200, 0.0, "Session")
+            .await;
+        return render_config(user, registry, services, "Saved.").await;
+    }
+
     let api_key = if form.api_key == "••••••••" {
         let existing = services.provider_configs().await.unwrap_or_default();
         existing
             .get(&form.provider)
-            .map(|(_, k, _)| k.clone())
+            .map(|(_, _, k, _)| k.clone())
             .unwrap_or_default()
     } else {
         form.api_key.clone()
@@ -158,7 +236,13 @@ pub async fn post_providers(
     };
 
     services
-        .provider_upsert(&form.provider, &form.base_url, &api_key, &form.model)
+        .provider_upsert(
+            &form.provider,
+            &backend.to_string(),
+            &form.base_url,
+            &api_key,
+            &form.model,
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -168,7 +252,9 @@ pub async fn post_providers(
 
     match form.provider.as_str() {
         "llm" => registry.set_llm(new_config),
-        "embedder" => registry.set_embedder(new_config),
+        // Normalize so a local embedder clears any stale base_url/api_key in
+        // the live registry too (the row itself is normalized by the DB write).
+        "embedder" => registry.set_embedder(new_config.normalize()),
         _ => {}
     }
 
@@ -178,33 +264,5 @@ pub async fn post_providers(
         Some(Ok(dim)) => format!("Saved. Embedding dimension: {dim}."),
     };
 
-    // Re-render the full page after save
-    let llm = registry.llm();
-    let embedder = registry.embedder();
-    let llm_has_key = llm.api_key.as_deref().is_some_and(|k| !k.is_empty());
-    let emb_has_key = embedder.api_key.as_deref().is_some_and(|k| !k.is_empty());
-    let body = maud::html! {
-        div class="alert alert-success mt-4 mb-4" role="alert" x-data="{ open: true }" x-show="open" {
-            svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-5 w-5" fill="none" viewBox="0 0 24 24" {
-                path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" {}
-            }
-            span class="flex-1" { (msg) }
-            button type="button" class="alert-close" x-on:click="open = false" aria-label="Close alert" {
-                svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" {
-                    path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" {}
-                }
-            }
-        }
-        div class="grid grid-cols-1 md:grid-cols-2 gap-6" {
-            (provider_card("llm", "LLM (extraction)", &llm, llm_has_key, false))
-            (provider_card("embedder", "Embedder", &embedder, emb_has_key, true))
-        }
-    };
-    Ok(Html(components::render_page(
-        "providers",
-        Some(&user.email),
-        "Configuration",
-        "Configuration",
-        body,
-    )))
+    render_config(user, registry, services, &msg).await
 }

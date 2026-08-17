@@ -2229,6 +2229,7 @@ dependencies = [
 name = "memayu-setup"
 version = "0.1.0-rc2"
 dependencies = [
+ "memayu-api",
  "memayu-config",
  "memayu-identity",
  "memayu-llm-client",

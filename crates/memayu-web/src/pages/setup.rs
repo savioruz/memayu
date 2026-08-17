@@ -4,7 +4,10 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::Form;
 use memayu_api::{WebServices, SESSION_COOKIE, SESSION_DURATION_SECS};
-use memayu_setup::{embedding_dimension, preseed, read_config_file_if_any, SetupAnswers};
+use memayu_setup::{
+    embedding_dimension, preseed, provider_configs_from_answers, read_config_file_if_any,
+    SetupAnswers,
+};
 
 // ── helpers ──
 
@@ -591,6 +594,16 @@ pub async fn post_setup(
         }
         Err(_) => String::new(),
     };
+
+    // Persist Category B (LLM + embedder + extraction mode) to the DB through
+    // the same shared write path the CLI/TUI wizard uses, so the choices made
+    // in the web wizard are not silently discarded. They take effect on the
+    // next server start (the running server's providers/extraction are fixed at
+    // launch, exactly as with the CLI wizard).
+    let (llm, embedder, mode) = provider_configs_from_answers(&answers);
+    if let Err(e) = services.setup_persist(&llm, &embedder, mode).await {
+        return Ok(Html(base_page("Setup", setup_form(&preseed(None), Some(&e)))).into_response());
+    }
 
     let redirect_url = if api_key.is_empty() {
         "/home".to_string()
