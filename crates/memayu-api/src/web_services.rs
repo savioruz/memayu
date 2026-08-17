@@ -84,20 +84,46 @@ impl WebServices {
 impl WebServices {
     pub async fn provider_configs(
         &self,
-    ) -> Result<HashMap<String, (String, String, String)>, String> {
+    ) -> Result<HashMap<String, (String, String, String, String)>, String> {
         self.db.provider_configs().await
     }
 
     pub async fn provider_upsert(
         &self,
         provider: &str,
+        backend: &str,
         base_url: &str,
         api_key: &str,
         model: &str,
     ) -> Result<(), String> {
         self.db
-            .upsert_provider_config(provider, base_url, api_key, model)
+            .upsert_provider_config(provider, backend, base_url, api_key, model)
             .await
+    }
+
+    pub async fn get_extraction_mode(&self) -> Result<Option<String>, String> {
+        self.db.get_extraction_mode().await
+    }
+
+    pub async fn set_extraction_mode(&self, mode: &str) -> Result<(), String> {
+        self.db.set_extraction_mode(mode).await
+    }
+
+    /// Shared web-side persistence for Category B settings, mirroring the CLI/TUI
+    /// wizard's `finalize` write path. Called by the web `/setup` handler.
+    pub async fn setup_persist(
+        &self,
+        llm: &memayu_config::ProviderConfig,
+        embedder: &memayu_config::ProviderConfig,
+        extraction_mode: memayu_core::ExtractionMode,
+    ) -> Result<(), String> {
+        crate::modules::providers::service::persist_provider_config(
+            &self.db,
+            llm,
+            embedder,
+            extraction_mode,
+        )
+        .await
     }
 }
 

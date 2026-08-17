@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 pub struct ProviderConfigRequest {
     pub llm: Option<memayu_config::ProviderConfig>,
     pub embedder: Option<memayu_config::ProviderConfig>,
+    /// Optional `extraction_mode` ("llm" | "raw") to persist to the DB.
+    #[serde(default)]
+    pub extraction_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

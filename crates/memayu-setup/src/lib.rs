@@ -1,20 +1,27 @@
-//! Shared setup flow for the first-run configuration wizard (#54).
+//! Shared first-run setup flow for the configuration wizard (#54 / #55).
 //!
-//! Both presenters — the dialoguer CLI (`memayu setup`, default) and the
-//! ratatui TUI (`memayu setup --tui`) — drive the exact same ordered set of
-//! [`SetupStep`]s and collect into the same [`SetupAnswers`]. The only thing
-//! that differs between them is *how* a step is rendered (plain text prompt vs
-//! ratatui widget); the questions, their order, and the end result
-//! (config file + admin account + API key) are identical.
+//! Three presenters — the dialoguer CLI (`memayu setup`, default), the ratatui
+//! TUI (`memayu setup --tui`), and the web dashboard (`GET /setup`) — drive the
+//! exact same ordered set of [`SetupStep`]s and collect into the same
+//! [`SetupAnswers`]. The only thing that differs between them is *how* a step is
+//! rendered (plain text prompt, ratatui widget, or an HTML form); the questions,
+//! their order, and the end result (config file + admin account + API key) are
+//! identical.
 //!
-//! The step list in [`setup_steps`] is the single source of truth both
-//! presenters iterate, so neither can silently add or drop a step.
+//! The step list in [`SETUP_STEPS`] is the single source of truth all presenters
+//! iterate, so no presenter can silently add or drop a step.
 
-use memayu_config::{config_path, ConfigFile, StorageBackend, StorageConfig};
+use memayu_config::{config_path, read_config_file, ConfigFile, StorageBackend, StorageConfig};
 use memayu_llm_client::local_embedder::DEFAULT_MODEL_ID;
 use sysinfo::{Disks, System};
 
-/// Every question the wizard asks, in the order it is asked. Both presenters
+/// Read the config file at the canonical path, returning `None` when it does
+/// not exist or cannot be parsed. Used by presenters to prefill defaults.
+pub fn read_config_file_if_any() -> Option<ConfigFile> {
+    read_config_file(&config_path()).ok().flatten()
+}
+
+/// Every question the wizard asks, in the order it is asked. All presenters
 /// iterate this exact list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupStep {
@@ -49,7 +56,7 @@ pub enum SetupStep {
     ApiKeyLabel,
 }
 
-/// The single ordered list of steps shared by both presenters.
+/// The single ordered list of steps shared by all presenters.
 pub const SETUP_STEPS: &[SetupStep] = &[
     SetupStep::DeviceCheck,
     SetupStep::StorageBackend,
@@ -67,8 +74,8 @@ pub const SETUP_STEPS: &[SetupStep] = &[
     SetupStep::ApiKeyLabel,
 ];
 
-/// All answers collected by the wizard. The same struct is filled by both the
-/// CLI and TUI presenters, then handed to [`finalize`].
+/// All answers collected by the wizard. The same struct is filled by every
+/// presenter, then handed to [`finalize`].
 #[derive(Debug, Clone)]
 pub struct SetupAnswers {
     pub storage_backend: StorageBackend,
@@ -88,9 +95,13 @@ pub struct SetupAnswers {
     pub port: u16,
     pub api_key_label: String,
     /// Device capability report computed once at wizard start; gates whether
-    /// the `local` embedder option is offered and is re-displayed by the
-    /// DeviceCheck step.
+    /// the `local` embedder option is offered.
     pub device: DeviceReport,
+    /// Embedding dimension determined by setup: from the local model catalog,
+    /// or (for a remote embedder) from a one-shot dimension probe performed in
+    /// [`finalize`]. Persisted to the config file so server startup never needs
+    /// to probe the embedder.
+    pub embedding_dim: Option<usize>,
 }
 
 impl Default for SetupAnswers {
@@ -103,7 +114,7 @@ impl Default for SetupAnswers {
             embedder_base_url: "https://api.openai.com/v1".into(),
             embedder_api_key: String::new(),
             embedder_model: DEFAULT_MODEL_ID.to_string(),
-            extraction_mode: "llm".into(),
+            extraction_mode: "raw".into(),
             llm_base_url: "https://api.openai.com/v1".into(),
             llm_api_key: String::new(),
             llm_model: "gpt-4".into(),
@@ -113,6 +124,7 @@ impl Default for SetupAnswers {
             port: 18080,
             api_key_label: "default".into(),
             device: DeviceReport::default(),
+            embedding_dim: None,
         }
     }
 }
@@ -122,7 +134,7 @@ impl Default for SetupAnswers {
 /// All entries are BERT-architecture checkpoints, which is what the Candle
 /// embedder loads. `EmbeddingGemma-300M` is intentionally absent: it is a
 /// Gemma (decoder-only) model and will be added as a follow-up once the
-/// embedder grows a Gemma code path (#TODO gemma-support).
+/// embedder grows a Gemma code path.
 pub struct LocalModelSpec {
     /// Hugging Face model id, as written to `config.toml` / passed to Candle.
     pub id: &'static str,
@@ -194,7 +206,7 @@ pub const LOCAL_MODELS: &[LocalModelSpec] = &[
 ];
 
 /// The short names of [`LOCAL_MODELS`], in the same order — used directly as a
-/// `&'static [&'static str]` select option list by both presenters.
+/// select option list by every presenter.
 pub const LOCAL_MODEL_NAMES: &[&str] = &[
     "all-MiniLM-L6-v2",
     "bge-small-en-v1.5",
@@ -438,7 +450,7 @@ pub fn step_active(step: SetupStep, a: &SetupAnswers) -> bool {
     }
 }
 
-/// The label shown for a step (used by both presenters for consistent headers).
+/// The label shown for a step (used by every presenter for consistent headers).
 pub fn step_title(step: SetupStep) -> &'static str {
     match step {
         SetupStep::DeviceCheck => "Device check",
@@ -478,13 +490,15 @@ pub struct SetupResult {
     pub api_key: String,
 }
 
-/// Complete setup: write the config file, create/resolve the admin account, and
-/// generate the API key. Shared by both presenters, so the CLI and TUI paths
-/// produce identical results. Rendering the returned values is the caller's
-/// job (the TUI draws them on screen rather than writing to stdout).
-pub async fn finalize(a: &SetupAnswers) -> Result<SetupResult, Box<dyn std::error::Error>> {
-    // 1. Serialize and write the config file.
-    let cf = ConfigFile {
+/// Serialize the [`SetupAnswers`] into a [`ConfigFile`]. Used by every
+/// presenter before writing, and exposed so callers can inspect the TOML.
+pub fn config_file_from_answers(a: &SetupAnswers) -> ConfigFile {
+    // Raw mode never calls an LLM, so it must not carry a placeholder/default
+    // LLM block. A raw config writes an empty (no base_url/model/key) block;
+    // `llm` mode writes the configured provider. This keeps a raw instance from
+    // persisting a misleading gpt-4 placeholder in the config file or DB.
+    let raw_mode = a.extraction_mode == "raw";
+    ConfigFile {
         storage: Some(memayu_config::StorageConfigFile {
             backend: a.storage_backend.to_string(),
             libsql_path: if a.libsql_path.is_empty() {
@@ -500,13 +514,21 @@ pub async fn finalize(a: &SetupAnswers) -> Result<SetupResult, Box<dyn std::erro
         }),
         llm: Some(memayu_config::ProviderConfigFile {
             backend: Some("remote".to_string()),
-            base_url: Some(a.llm_base_url.clone()),
-            api_key: if a.llm_api_key.is_empty() {
+            base_url: if raw_mode {
+                None
+            } else {
+                Some(a.llm_base_url.clone())
+            },
+            api_key: if raw_mode || a.llm_api_key.is_empty() {
                 None
             } else {
                 Some(a.llm_api_key.clone())
             },
-            model: Some(a.llm_model.clone()),
+            model: if raw_mode {
+                None
+            } else {
+                Some(a.llm_model.clone())
+            },
         }),
         embedder: Some(memayu_config::ProviderConfigFile {
             backend: Some(a.embedder_backend.clone()),
@@ -530,7 +552,105 @@ pub async fn finalize(a: &SetupAnswers) -> Result<SetupResult, Box<dyn std::erro
             similarity_threshold: Some(0.65),
             extraction_mode: Some(a.extraction_mode.clone()),
         }),
+        embedding_dim: effective_embedding_dimension(a),
+    }
+}
+
+/// The dimension to persist: the probed/catalog value recorded on `a` first,
+/// falling back to the local model catalog lookup for the `local` backend.
+/// Remote backends rely on the probe done in [`finalize`]; when that probe is
+/// unavailable (e.g. it was skipped), this returns `None` and the config simply
+/// omits `embedding_dim`, leaving dimension resolution to server startup.
+pub fn effective_embedding_dimension(a: &SetupAnswers) -> Option<usize> {
+    a.embedding_dim.or_else(|| embedding_dimension(a))
+}
+
+/// The embedding dimension known statically from the selected model.
+///
+/// For the local (Candle) backend the dimension is known from the model catalog
+/// ([`LOCAL_MODELS`]). For the remote (HTTP) backend the dimension is *not*
+/// known statically — [`finalize`] performs a one-shot dimension probe instead,
+/// so this returns `None` and the probed value is recorded on `a.embedding_dim`.
+pub fn embedding_dimension(a: &SetupAnswers) -> Option<usize> {
+    if a.embedder_backend == "local" {
+        LOCAL_MODELS
+            .iter()
+            .find(|m| m.id == a.embedder_model)
+            .map(|m| m.dim as usize)
+    } else {
+        None
+    }
+}
+
+/// Map wizard answers into the DB-persisted Category B slice: the LLM and
+/// embedder provider configs plus the extraction mode. Shared by the CLI/TUI
+/// wizard (`finalize`) and the web `/setup` handler so all three persist the
+/// exact same values.
+pub fn provider_configs_from_answers(
+    a: &SetupAnswers,
+) -> (
+    memayu_config::ProviderConfig,
+    memayu_config::ProviderConfig,
+    memayu_config::ExtractionMode,
+) {
+    let raw_mode = a.extraction_mode == "raw";
+    let llm = memayu_config::ProviderConfig {
+        backend: memayu_config::EmbedderBackend::Remote,
+        base_url: if raw_mode {
+            String::new()
+        } else {
+            a.llm_base_url.clone()
+        },
+        api_key: if raw_mode || a.llm_api_key.is_empty() {
+            None
+        } else {
+            Some(a.llm_api_key.clone())
+        },
+        model: if raw_mode {
+            String::new()
+        } else {
+            a.llm_model.clone()
+        },
     };
+    let embedder = memayu_config::ProviderConfig {
+        backend: a.embedder_backend.parse().unwrap_or_default(),
+        base_url: a.embedder_base_url.clone(),
+        api_key: if a.embedder_api_key.is_empty() {
+            None
+        } else {
+            Some(a.embedder_api_key.clone())
+        },
+        model: a.embedder_model.clone(),
+    };
+    let mode = a.extraction_mode.parse().unwrap_or_default();
+    (llm, embedder, mode)
+}
+
+/// Complete setup: write the config file, create/resolve the admin account, and
+/// generate the API key. Shared by all presenters, so the CLI, TUI, and web
+/// paths produce identical results. Rendering the returned values is the
+/// caller's job.
+pub async fn finalize(a: &SetupAnswers) -> Result<SetupResult, Box<dyn std::error::Error>> {
+    // 0. Determine the embedding dimension. Local backends know it from the
+    //    model catalog; remote backends require a one-shot probe. The result is
+    //    recorded on the answers and persisted to the config file below, so
+    //    server startup never has to probe the embedder again (#55).
+    let mut a = a.clone();
+    if a.embedder_backend != "local" {
+        let (_, embedder_cfg, _) = provider_configs_from_answers(&a);
+        let embedder = memayu_llm_client::build_embedder(&embedder_cfg);
+        match embedder.embed("dimension probe").await {
+            Ok(vec) => a.embedding_dim = Some(vec.len()),
+            Err(e) => eprintln!(
+                "[memayu] warning: could not probe embedder dimension ({}); \
+                 startup will need MEMAYU_EMBEDDER_DIM or an existing store",
+                e
+            ),
+        }
+    }
+
+    // 1. Serialize and write the config file.
+    let cf = config_file_from_answers(&a);
     let toml_str = toml::to_string_pretty(&cf)?;
     let path = config_path();
     if let Some(parent) = path.parent() {
@@ -539,7 +659,7 @@ pub async fn finalize(a: &SetupAnswers) -> Result<SetupResult, Box<dyn std::erro
     std::fs::write(&path, &toml_str)?;
 
     // 2. Create or resolve the admin account (re-config already has one).
-    let storage = storage_config(a);
+    let storage = storage_config(&a);
     let admin_id = match memayu_identity::resolve_self_hosted_account_id(&storage).await {
         Ok(id) => id,
         Err(memayu_identity::IdentityError::NoAdminAccount) => {
@@ -560,6 +680,19 @@ pub async fn finalize(a: &SetupAnswers) -> Result<SetupResult, Box<dyn std::erro
         .await
         .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
 
+    // 4. Persist Category B (LLM + embedder + extraction mode) to the DB via the
+    //    shared write path. The DB is authoritative after first boot, so the
+    //    choices made here survive subsequent env-only starts. Mirrored by the
+    //    web `/setup` handler.
+    let (llm, embedder, mode) = provider_configs_from_answers(&a);
+    let db = memayu_api::DbClient::open(&storage)
+        .await
+        .map_err(Box::<dyn std::error::Error>::from)?;
+    memayu_api::WebServices::new(db)
+        .setup_persist(&llm, &embedder, mode)
+        .await
+        .map_err(Box::<dyn std::error::Error>::from)?;
+
     Ok(SetupResult {
         config_path: path,
         api_key: key.key,
@@ -567,6 +700,7 @@ pub async fn finalize(a: &SetupAnswers) -> Result<SetupResult, Box<dyn std::erro
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -590,5 +724,141 @@ mod tests {
             ..DeviceReport::default()
         };
         assert_eq!(fmt_cpu(&d), "Apple M1 — 8 cores / 8 threads");
+    }
+
+    #[test]
+    fn embedding_dimension_local_looks_up_catalog() {
+        let mut a = SetupAnswers::default();
+        a.embedder_backend = "local".into();
+        a.embedder_model = "BAAI/bge-small-en-v1.5".into();
+        assert_eq!(embedding_dimension(&a), Some(384));
+    }
+
+    #[test]
+    fn embedding_dimension_local_unknown_model_none() {
+        let mut a = SetupAnswers::default();
+        a.embedder_backend = "local".into();
+        a.embedder_model = "unknown/model".into();
+        assert_eq!(embedding_dimension(&a), None);
+    }
+
+    #[test]
+    fn embedding_dimension_remote_is_none() {
+        let mut a = SetupAnswers::default();
+        a.embedder_backend = "remote".into();
+        a.embedder_model = "text-embedding-3-small".into();
+        assert_eq!(embedding_dimension(&a), None);
+    }
+
+    #[test]
+    fn step_branching_matches_presenters() {
+        let mut a = SetupAnswers::default();
+        // Local embedder → LocalModel active, EmbedderConfig inactive.
+        a.embedder_backend = "local".into();
+        assert!(step_active(SetupStep::LocalModel, &a));
+        assert!(!step_active(SetupStep::EmbedderConfig, &a));
+        // Remote embedder → inverse.
+        a.embedder_backend = "remote".into();
+        assert!(!step_active(SetupStep::LocalModel, &a));
+        assert!(step_active(SetupStep::EmbedderConfig, &a));
+        // Raw extraction → LLM config inactive.
+        a.extraction_mode = "raw".into();
+        assert!(!step_active(SetupStep::LlmConfig, &a));
+        a.extraction_mode = "llm".into();
+        assert!(step_active(SetupStep::LlmConfig, &a));
+    }
+
+    #[test]
+    fn config_file_reflects_backend_and_mode() {
+        let mut a = SetupAnswers::default();
+        a.embedder_backend = "remote".into();
+        a.embedder_base_url = "https://emb.example.com/v1".into();
+        a.embedder_model = "text-embedding-3-small".into();
+        a.extraction_mode = "llm".into();
+        a.llm_base_url = "https://llm.example.com/v1".into();
+        a.llm_model = "gpt-4".into();
+        let cf = config_file_from_answers(&a);
+        assert_eq!(
+            cf.embedder.as_ref().unwrap().backend.as_deref(),
+            Some("remote")
+        );
+        assert_eq!(
+            cf.embedder.as_ref().unwrap().base_url.as_deref(),
+            Some("https://emb.example.com/v1")
+        );
+        assert_eq!(
+            cf.behavior.as_ref().unwrap().extraction_mode.as_deref(),
+            Some("llm")
+        );
+        assert_eq!(cf.llm.as_ref().unwrap().model.as_deref(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn config_file_local_embedder_still_writes_backend() {
+        let mut a = SetupAnswers::default();
+        a.embedder_backend = "local".into();
+        a.embedder_model = "sentence-transformers/all-MiniLM-L6-v2".into();
+        let cf = config_file_from_answers(&a);
+        assert_eq!(
+            cf.embedder.as_ref().unwrap().backend.as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            cf.embedder.as_ref().unwrap().model.as_deref(),
+            Some("sentence-transformers/all-MiniLM-L6-v2")
+        );
+    }
+
+    #[test]
+    fn raw_mode_provider_configs_carry_no_llm() {
+        // The wizard defaults to `raw` and retains placeholder LLM answers
+        // (gpt-4). In raw mode the DB write must not carry a placeholder LLM
+        // provider, otherwise the instance could appear to be in llm mode.
+        let a = SetupAnswers::default();
+        assert_eq!(a.extraction_mode, "raw");
+        assert_eq!(a.llm_base_url, "https://api.openai.com/v1");
+        assert_eq!(a.llm_model, "gpt-4");
+        let (llm, _embedder, mode) = provider_configs_from_answers(&a);
+        assert_eq!(mode, memayu_config::ExtractionMode::Raw);
+        assert_eq!(
+            llm.base_url, "",
+            "raw mode must not persist an LLM base_url"
+        );
+        assert_eq!(llm.model, "", "raw mode must not persist an LLM model");
+        assert!(
+            llm.api_key.is_none(),
+            "raw mode must not persist an LLM key"
+        );
+    }
+
+    #[test]
+    fn llm_mode_provider_configs_keep_llm() {
+        let mut a = SetupAnswers::default();
+        a.extraction_mode = "llm".into();
+        a.llm_base_url = "https://llm.example.com/v1".into();
+        a.llm_api_key = "sk-test".into();
+        a.llm_model = "gpt-4".into();
+        let (llm, _embedder, mode) = provider_configs_from_answers(&a);
+        assert_eq!(mode, memayu_config::ExtractionMode::Llm);
+        assert_eq!(llm.base_url, "https://llm.example.com/v1");
+        assert_eq!(llm.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(llm.model, "gpt-4");
+    }
+
+    #[test]
+    fn raw_mode_config_file_has_no_llm_placeholder() {
+        let a = SetupAnswers::default();
+        let cf = config_file_from_answers(&a);
+        assert_eq!(
+            cf.behavior.as_ref().unwrap().extraction_mode.as_deref(),
+            Some("raw")
+        );
+        let llm = cf.llm.as_ref().unwrap();
+        assert_eq!(
+            llm.base_url, None,
+            "raw config must not write an LLM base_url"
+        );
+        assert_eq!(llm.model, None, "raw config must not write an LLM model");
+        assert_eq!(llm.api_key, None, "raw config must not write an LLM key");
     }
 }

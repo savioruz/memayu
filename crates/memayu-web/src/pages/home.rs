@@ -19,9 +19,15 @@ pub struct ListCursorQuery {
     pub cursor: Option<String>,
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct HomeQuery {
+    pub new_key: Option<String>,
+}
+
 pub async fn get_home(
     user: CurrentUser,
     State(service): State<Arc<MemoryService>>,
+    Query(query): Query<HomeQuery>,
 ) -> Result<Html<String>, (axum::http::StatusCode, String)> {
     let page = service
         .list_memories_paged(&user.id, LIST_PAGE_SIZE, None, None)
@@ -39,6 +45,54 @@ pub async fn get_home(
         "Home",
         "Home",
         maud::html! {
+            @if let Some(key) = &query.new_key {
+                dialog class="modal" id="setup-key-modal" {
+                    div class="modal-box max-w-md" {
+                        h3 class="text-lg font-bold" { "Key created: default" }
+                        div class="mt-4" {
+                            input
+                                type="text"
+                                readonly
+                                value=(key)
+                                class="input input-bordered w-full font-mono text-xs select-all bg-base-200"
+                                x-data=""
+                                x-on:click="
+                                    $el.select();
+                                    navigator.clipboard.writeText($el.value);
+                                ";
+                        }
+                        p class="text-xs text-base-content/50 mt-2" {
+                            "Click the key to copy. It won't be shown again."
+                        }
+                        div class="modal-action mt-6" {
+                            button
+                                type="button"
+                                class="btn btn-primary btn-sm"
+                                onclick="
+                                    document.getElementById('setup-key-modal').close();
+                                    window.history.replaceState({}, '', '/home');
+                                " { "Done" }
+                        }
+                    }
+                    form method="dialog" class="modal-backdrop" {
+                        button type="button" onclick="document.getElementById('setup-key-modal').close(); window.history.replaceState({}, '', '/home');" { "close" }
+                    }
+                }
+                (maud::PreEscaped(r#"<script>
+                    document.addEventListener('DOMContentLoaded', function() {
+                        var m = document.getElementById('setup-key-modal');
+                        if (m && typeof m.showModal === 'function') {
+                            m.showModal();
+                        }
+                    });
+                    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+                        var m = document.getElementById('setup-key-modal');
+                        if (m && typeof m.showModal === 'function' && !m.open) {
+                            m.showModal();
+                        }
+                    }
+                </script>"#))
+            }
             div class="mb-4" {
                 @let mode = service.extraction_mode();
                 @if mode.to_string() == "raw" {

@@ -40,6 +40,7 @@ impl DbClient {
         self.init_users().await?;
         self.init_sessions().await?;
         self.init_provider_config().await?;
+        self.init_runtime_settings().await?;
         self.init_api_keys().await?;
         self.init_request_logs().await?;
         Ok(())
@@ -121,6 +122,7 @@ impl DbClient {
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS provider_config (
                         provider TEXT PRIMARY KEY,
+                        backend TEXT NOT NULL DEFAULT 'remote',
                         base_url TEXT NOT NULL,
                         api_key TEXT NOT NULL,
                         model TEXT NOT NULL,
@@ -130,11 +132,13 @@ impl DbClient {
                 )
                 .await
                 .map_err(|e| format!("create provider_config table: {e}"))?;
+                self.ensure_provider_config_backend_libsql(conn).await?;
             }
             DbClient::Postgres(pool) => {
                 sqlx::query(
                     "CREATE TABLE IF NOT EXISTS provider_config (
                         provider TEXT PRIMARY KEY,
+                        backend TEXT NOT NULL DEFAULT 'remote',
                         base_url TEXT NOT NULL,
                         api_key TEXT NOT NULL,
                         model TEXT NOT NULL,
@@ -144,6 +148,77 @@ impl DbClient {
                 .execute(pool)
                 .await
                 .map_err(|e| format!("create provider_config table: {e}"))?;
+                sqlx::query(
+                    "ALTER TABLE provider_config
+                     ADD COLUMN IF NOT EXISTS backend TEXT NOT NULL DEFAULT 'remote'",
+                )
+                .execute(pool)
+                .await
+                .map_err(|e| format!("add provider_config.backend: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Migrate a pre-existing libsql `provider_config` table to add the
+    /// `backend` column (SQLite has no `ADD COLUMN IF NOT EXISTS`, so check
+    /// `PRAGMA table_info` first). The LLM row always stays `remote`; the
+    /// column is only meaningful for the embedder row.
+    async fn ensure_provider_config_backend_libsql(
+        &self,
+        conn: &libsql::Connection,
+    ) -> Result<(), String> {
+        let mut cols = conn
+            .query("PRAGMA table_info(provider_config)", ())
+            .await
+            .map_err(|e| format!("inspect provider_config columns: {e}"))?;
+        while let Some(row) = cols
+            .next()
+            .await
+            .map_err(|e| format!("read columns: {e}"))?
+        {
+            let name: String = row.get(1).map_err(|e| format!("column name: {e}"))?;
+            if name == "backend" {
+                return Ok(());
+            }
+        }
+        conn.execute(
+            "ALTER TABLE provider_config ADD COLUMN backend TEXT NOT NULL DEFAULT 'remote'",
+            (),
+        )
+        .await
+        .map_err(|e| format!("add provider_config.backend: {e}"))?;
+        Ok(())
+    }
+
+    /// Single-row key/value table for runtime-tunable behavior settings.
+    ///
+    /// Stores fields that are DB-authoritative after first boot but are seeded
+    /// from Category B config on a fresh install — currently just
+    /// `extraction_mode`.
+    async fn init_runtime_settings(&self) -> Result<(), String> {
+        match self {
+            DbClient::Libsql(conn) => {
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS runtime_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )",
+                    (),
+                )
+                .await
+                .map_err(|e| format!("create runtime_settings table: {e}"))?;
+            }
+            DbClient::Postgres(pool) => {
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS runtime_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )",
+                )
+                .execute(pool)
+                .await
+                .map_err(|e| format!("create runtime_settings table: {e}"))?;
             }
         }
         Ok(())

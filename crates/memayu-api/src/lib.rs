@@ -15,7 +15,8 @@ pub use modules::auth::service::{
     expires_at_rfc3339, validate_password, SESSION_COOKIE, SESSION_DURATION_SECS,
 };
 pub use modules::providers::service::{
-    load_registry, ConfigRegistry, EmbedderConfigProvider, LlmConfigProvider,
+    ensure_provider_config, load_extraction_mode, load_registry, ConfigRegistry,
+    EmbedderConfigProvider, LlmConfigProvider,
 };
 pub use modules::request_logs::model::RequestLog;
 pub use transport::middleware::{

@@ -2109,6 +2109,7 @@ dependencies = [
  "memayu-identity",
  "memayu-llm-client",
  "memayu-mcp",
+ "memayu-setup",
  "memayu-storage-libsql",
  "memayu-storage-postgres",
  "memayu-web",
@@ -2225,6 +2226,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "memayu-setup"
+version = "0.1.0-rc2"
+dependencies = [
+ "memayu-api",
+ "memayu-config",
+ "memayu-identity",
+ "memayu-llm-client",
+ "sysinfo",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "memayu-storage-libsql"
 version = "0.1.0-rc2"
 dependencies = [
@@ -2266,6 +2280,7 @@ dependencies = [
  "memayu-config",
  "memayu-core",
  "memayu-llm-client",
+ "memayu-setup",
  "memayu-storage-libsql",
  "mime_guess",
  "rust-embed",

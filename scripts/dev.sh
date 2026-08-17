@@ -10,12 +10,28 @@ fi
 
 MODE="${1:-tui}"
 
-for var in MEMAYU_LLM_BASE_URL MEMAYU_LLM_MODEL MEMAYU_EMBEDDER_BASE_URL MEMAYU_EMBEDDER_MODEL; do
+# Validate only the vars the effective mode actually needs, mirroring
+# memayu-config: the LLM is unused in raw extraction mode, and the local
+# embedder needs no base_url.
+require() {
+  var="$1"
   if [ -z "$(eval echo \$$var)" ]; then
     echo "[dev] ERROR: $var is not set"
     exit 1
   fi
-done
+}
+
+# LLM provider — only needed when extraction mode is not raw.
+if [ "$MEMAYU_EXTRACTION_MODE" != "raw" ]; then
+  require MEMAYU_LLM_BASE_URL
+  require MEMAYU_LLM_MODEL
+fi
+
+# Embedding provider — base_url only for the remote (BYOK) backend.
+if [ "$MEMAYU_EMBEDDER_BACKEND" != "local" ]; then
+  require MEMAYU_EMBEDDER_BASE_URL
+fi
+require MEMAYU_EMBEDDER_MODEL
 
 case "$MODE" in
   tui)

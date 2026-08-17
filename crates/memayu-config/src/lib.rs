@@ -40,22 +40,23 @@ impl std::str::FromStr for StorageBackend {
 
 /// Where the embedding model runs.
 ///
-/// - [`EmbedderBackend::Http`] is the default: an OpenAI-compatible remote
-///   endpoint (the legacy behavior, BYOK).
+/// - [`EmbedderBackend::Remote`] is the default: an OpenAI-compatible remote
+///   endpoint (the legacy BYOK behavior).
 /// - [`EmbedderBackend::Local`] runs a Candle-based model entirely in-process
 ///   with no API key and no network call at inference time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbedderBackend {
     #[default]
-    Http,
+    #[serde(alias = "http")]
+    Remote,
     Local,
 }
 
 impl std::fmt::Display for EmbedderBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EmbedderBackend::Http => write!(f, "http"),
+            EmbedderBackend::Remote => write!(f, "remote"),
             EmbedderBackend::Local => write!(f, "local"),
         }
     }
@@ -65,10 +66,10 @@ impl std::str::FromStr for EmbedderBackend {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "http" => Ok(EmbedderBackend::Http),
+            "remote" | "http" => Ok(EmbedderBackend::Remote),
             "local" => Ok(EmbedderBackend::Local),
             other => Err(format!(
-                "unknown embedder backend \"{other}\"; expected \"http\" or \"local\""
+                "unknown embedder backend \"{other}\"; expected \"remote\" or \"local\""
             )),
         }
     }
@@ -82,6 +83,22 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub api_key: Option<String>,
     pub model: String,
+}
+
+impl ProviderConfig {
+    /// A local embedder needs neither a `base_url` nor an `api_key` — it runs a
+    /// Candle model entirely in-process. Clearing them here (rather than merely
+    /// leaving them unset) prevents a stale value from a prior remote
+    /// configuration from being carried over when the backend is switched to
+    /// local. Every write path normalizes through this before persisting, so a
+    /// single source of truth exists instead of per-site clearing logic.
+    pub fn normalize(mut self) -> Self {
+        if matches!(self.backend, EmbedderBackend::Local) {
+            self.base_url.clear();
+            self.api_key = None;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -135,6 +152,10 @@ pub struct ConfigFile {
     pub server: Option<ServerConfigFile>,
     #[serde(default)]
     pub behavior: Option<BehaviorConfigFile>,
+    /// Optional fixed embedding dimension recorded by `memayu setup`. Used only
+    /// when `MEMAYU_EMBEDDER_DIM` is not set; the env var always wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_dim: Option<usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -153,7 +174,7 @@ fn default_storage_backend_file() -> String {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProviderConfigFile {
-    /// Optional embedder backend: "http" (default) or "local". Ignored for the LLM.
+    /// Optional embedder backend: "remote" (default) or "local". Ignored for the LLM.
     #[serde(default)]
     pub backend: Option<String>,
     #[serde(default)]
@@ -197,6 +218,88 @@ pub struct Config {
 }
 
 // ── Helpers ──
+
+/// Category A (infrastructure) only: storage + server bind, resolved from file
+/// defaults and env overrides, without any Category B (provider/extraction)
+/// validation. Used to boot the setup-only web path when a full
+/// [`Config::load`] fails because a fresh, unconfigured install has no provider
+/// settings yet.
+#[derive(Debug, Clone)]
+pub struct InfrastructureConfig {
+    pub storage: StorageConfig,
+    pub bind_addr: String,
+    pub port: u16,
+}
+
+/// Resolve just the infrastructure slice of config (see [`InfrastructureConfig`]).
+/// Never requires or validates LLM / embedder / extraction settings.
+pub fn load_infrastructure() -> Result<InfrastructureConfig, ConfigError> {
+    let env_map: HashMap<String, String> = std::env::vars().collect();
+    let cf = read_config_file(&config_path())?;
+    let file = cf.unwrap_or_default();
+
+    let backend: StorageBackend = env_map
+        .get("MEMAYU_STORAGE_BACKEND")
+        .map(|s| {
+            s.parse().map_err(|e| ConfigError::Invalid {
+                var: "MEMAYU_STORAGE_BACKEND",
+                value: s.clone(),
+                detail: e,
+            })
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            file.storage
+                .as_ref()
+                .and_then(|s| s.backend.parse().ok())
+                .unwrap_or(StorageBackend::Libsql)
+        });
+
+    let database_url = match backend {
+        StorageBackend::Libsql => None,
+        StorageBackend::Postgres => Some(
+            env_map
+                .get("MEMAYU_DATABASE_URL")
+                .cloned()
+                .or_else(|| file.storage.as_ref().and_then(|s| s.database_url.clone()))
+                .unwrap_or_default(),
+        ),
+    };
+
+    let storage = StorageConfig {
+        backend,
+        libsql_path: env_map
+            .get("MEMAYU_LIBSQL_PATH")
+            .cloned()
+            .or_else(|| file.storage.as_ref().and_then(|s| s.libsql_path.clone()))
+            .unwrap_or_else(|| "./memayu.db".into()),
+        database_url,
+    };
+
+    let bind_addr = env_map
+        .get("MEMAYU_BIND_ADDR")
+        .cloned()
+        .or_else(|| file.server.as_ref().and_then(|s| s.bind_addr.clone()))
+        .unwrap_or_else(|| "127.0.0.1".into());
+    let port: u16 = env_map
+        .get("MEMAYU_PORT")
+        .map(|p| {
+            p.parse().map_err(|_| ConfigError::Invalid {
+                var: "MEMAYU_PORT",
+                value: p.clone(),
+                detail: "expected a u16 port number".into(),
+            })
+        })
+        .transpose()?
+        .or_else(|| file.server.as_ref().and_then(|s| s.port))
+        .unwrap_or(18080);
+
+    Ok(InfrastructureConfig {
+        storage,
+        bind_addr,
+        port,
+    })
+}
 
 fn validate_url(var: &'static str, value: String) -> Result<String, ConfigError> {
     if value.starts_with("http://") || value.starts_with("https://") {
@@ -363,7 +466,7 @@ impl Config {
         };
 
         // ── Embedder ──
-        // Backend: "http" (default, BYOK) or "local" (in-process Candle model).
+        // Backend: "remote" (default, BYOK) or "local" (in-process Candle model).
         // A local backend needs no base_url or api_key.
         let emb_backend: EmbedderBackend = env
             .get("MEMAYU_EMBEDDER_BACKEND")
@@ -380,7 +483,7 @@ impl Config {
                     .as_ref()
                     .and_then(|l| l.backend.as_deref())
                     .and_then(|b| b.parse().ok())
-                    .unwrap_or(EmbedderBackend::Http)
+                    .unwrap_or(EmbedderBackend::Remote)
             });
 
         let emb_base_url = if emb_backend == EmbedderBackend::Local {
@@ -442,16 +545,16 @@ impl Config {
             .or_else(|| file.behavior.as_ref().and_then(|b| b.similarity_threshold))
             .unwrap_or(0.65);
 
-        let dim = env
-            .get("MEMAYU_EMBEDDING_DIM")
-            .map(|v| {
-                v.parse().map_err(|_| ConfigError::Invalid {
-                    var: "MEMAYU_EMBEDDING_DIM",
-                    value: v.clone(),
-                    detail: "expected a positive integer".into(),
-                })
-            })
-            .transpose()?;
+        let dim = match env.get("MEMAYU_EMBEDDER_DIM") {
+            Some(v) => Some(v.parse().map_err(|_| ConfigError::Invalid {
+                var: "MEMAYU_EMBEDDER_DIM",
+                value: v.clone(),
+                detail: "expected a positive integer".into(),
+            })?),
+            // No env override: fall back to the dimension recorded in the config
+            // file by `memayu setup` (so fresh installs boot without probing).
+            None => file.embedding_dim,
+        };
 
         Ok(Self {
             storage: StorageConfig {
@@ -464,7 +567,7 @@ impl Config {
                 database_url: postgres_url,
             },
             llm: ProviderConfig {
-                backend: EmbedderBackend::Http,
+                backend: EmbedderBackend::Remote,
                 base_url: if llm_base_url.is_empty() {
                     llm_base_url
                 } else {
@@ -507,7 +610,7 @@ impl Config {
                 msgs.push("llm.model: missing — set MEMAYU_LLM_MODEL".into());
             }
         }
-        if self.embedder.backend == EmbedderBackend::Http && self.embedder.base_url.is_empty() {
+        if self.embedder.backend == EmbedderBackend::Remote && self.embedder.base_url.is_empty() {
             msgs.push("embedder.base_url: missing — set MEMAYU_EMBEDDER_BASE_URL".into());
         }
         if self.embedder.model.is_empty() {
@@ -620,13 +723,13 @@ fn cloud_config(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
             database_url: None,
         },
         llm: ProviderConfig {
-            backend: EmbedderBackend::Http,
+            backend: EmbedderBackend::Remote,
             base_url: String::new(),
             api_key: None,
             model: String::new(),
         },
         embedder: ProviderConfig {
-            backend: EmbedderBackend::Http,
+            backend: EmbedderBackend::Remote,
             base_url: String::new(),
             api_key: None,
             model: String::new(),
@@ -772,7 +875,7 @@ mod tests {
         env.insert("MEMAYU_STORAGE_BACKEND".into(), "postgres".into());
         env.insert("MEMAYU_DATABASE_URL".into(), "postgres://u:p@h/db".into());
         env.insert("MEMAYU_PORT".into(), "9000".into());
-        env.insert("MEMAYU_EMBEDDING_DIM".into(), "768".into());
+        env.insert("MEMAYU_EMBEDDER_DIM".into(), "768".into());
         let cfg = Config::from_env(&env).unwrap();
         assert_eq!(cfg.storage.backend, StorageBackend::Postgres);
         assert_eq!(
@@ -904,13 +1007,13 @@ mod tests {
                 database_url: None,
             },
             llm: ProviderConfig {
-                backend: EmbedderBackend::Http,
+                backend: EmbedderBackend::Remote,
                 base_url: String::new(),
                 api_key: None,
                 model: String::new(),
             },
             embedder: ProviderConfig {
-                backend: EmbedderBackend::Http,
+                backend: EmbedderBackend::Remote,
                 base_url: String::new(),
                 api_key: None,
                 model: String::new(),

@@ -84,3 +84,23 @@ pub fn build_web_router(
         .route("/static/{*path}", get(assets::serve_static))
         .with_state(state)
 }
+
+/// Minimal router for the setup-only boot path (#55). Served when the process
+/// starts with a valid infrastructure slice (storage + bind address + port)
+/// but no fully-valid config yet — i.e. a fresh, unconfigured install. Only the
+/// first-run setup page and static assets are reachable; the dashboard,
+/// providers, and API routes are intentionally absent until setup completes
+/// and the server is restarted.
+///
+/// The setup handlers only touch [`WebServices`] (they never need
+/// `MemoryService` or a `ConfigRegistry`), so no placeholder service is
+/// required here.
+pub fn build_setup_router(db: memayu_api::DbClient) -> Router {
+    Router::new()
+        .route(
+            "/setup",
+            get(pages::setup::get_setup).post(pages::setup::post_setup),
+        )
+        .route("/static/{*path}", get(assets::serve_static))
+        .with_state(WebServices::new(db))
+}

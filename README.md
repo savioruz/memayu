@@ -217,7 +217,7 @@ The embedder can run fully on-device instead of calling a remote API. Set the em
 
 ```toml
 [embedder]
-backend = "local"               # "local" (on-device Candle) or "http" (BYOK, default)
+backend = "local"               # "local" (on-device Candle) or "remote" (BYOK, default)
 model   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 ```
 

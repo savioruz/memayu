@@ -163,7 +163,7 @@ mod tests {
 
     fn test_config() -> ProviderConfig {
         ProviderConfig {
-            backend: EmbedderBackend::Http,
+            backend: EmbedderBackend::Remote,
             base_url: "http://localhost:11434".into(),
             api_key: None,
             model: "test-model".into(),
@@ -184,6 +184,24 @@ mod tests {
             Arc::new(MockLlm),
         ));
         build_api_router(db, service, registry)
+    }
+
+    /// Like `build_test_app`, but returns the router alongside its in-memory
+    /// DbClient so tests can inspect the persisted provider_config rows.
+    async fn build_test_app_with_db() -> (Router, memayu_api::DbClient) {
+        let storage = StorageConfig {
+            backend: StorageBackend::Libsql,
+            libsql_path: ":memory:".to_string(),
+            database_url: None,
+        };
+        let db = open_db(&storage).await.unwrap();
+        let registry = ConfigRegistry::new(test_config(), test_config());
+        let service = Arc::new(MemoryService::new(
+            Arc::new(MockStorage::with(vec![])),
+            Arc::new(MockEmbedder),
+            Arc::new(MockLlm),
+        ));
+        (build_api_router(db.clone(), service, registry), db)
     }
 
     use axum::body::Body;
@@ -880,5 +898,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_providers_local_embedder_clears_stale_base_url() {
+        let (app, db) = build_test_app_with_db().await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/setup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"email":"test@memayu.dev","password":"Secret12","confirm":"Secret12"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Post a local embedder carrying a stale remote base_url/api_key.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(
+                        r#"{"embedder":{"backend":"local","base_url":"https://api.openai.com/v1","api_key":"sk-stale","model":"mini"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // The response reflects the cleared (normalized) registry config.
+        assert_eq!(json["embedder"]["base_url"], "");
+        assert_eq!(json["embedder"]["api_key"], serde_json::Value::Null);
+
+        // The persisted row is also cleared.
+        let rows = db.provider_configs().await.unwrap();
+        let (backend, base_url, api_key, _) = &rows["embedder"];
+        assert_eq!(backend, "local");
+        assert_eq!(
+            base_url, "",
+            "stale base_url must not be persisted via POST"
+        );
+        assert_eq!(api_key, "", "stale api_key must not be persisted via POST");
+
+        // A subsequent GET reflects the cleared value.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/providers")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["embedder"]["base_url"], "");
+        assert_eq!(json["embedder"]["api_key"], serde_json::Value::Null);
     }
 }

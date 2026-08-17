@@ -3,7 +3,7 @@
 //!
 //! `memayu setup` runs this presenter. It reads an existing config file (if
 //! present) as defaults for re-configuration, walks the exact same ordered
-//! [`crate::setup_flow::SETUP_STEPS`] as the `--tui` presenter, and hands the
+//! [`memayu_setup::SETUP_STEPS`] as the `--tui` presenter, and hands the
 //! collected answers to [`finalize`], which writes the config, creates the
 //! admin account, and generates the API key.
 
@@ -12,7 +12,7 @@ use memayu_config::{config_path, read_config_file, StorageBackend};
 use memayu_llm_client::local_embedder::DEFAULT_MODEL_ID;
 use std::io::IsTerminal;
 
-use crate::setup_flow::{
+use memayu_setup::{
     check_device, finalize, fmt_bytes, fmt_cpu, step_active, step_title, DeviceReport,
     SetupAnswers, SetupStep, LOCAL_MODELS, LOCAL_MODEL_NAMES, SETUP_STEPS,
 };
@@ -50,7 +50,7 @@ pub async fn run_cli_setup(preseed: bool) -> Result<(), Box<dyn std::error::Erro
     } else {
         None
     };
-    let mut a = crate::setup_flow::preseed(existing.as_ref());
+    let mut a = memayu_setup::preseed(existing.as_ref());
     // Probe the device once up front so the DeviceCheck step and the local
     // embedder gating share the same report.
     a.device = check_device();
@@ -122,10 +122,10 @@ fn render_step(step: SetupStep, a: &mut SetupAnswers) -> Result<(), Box<dyn std:
         },
         SetupStep::EmbedderBackend => {
             if a.device.local_supported {
-                let items = ["local", "http"];
-                let default = if a.embedder_backend == "http" { 1 } else { 0 };
+                let items = ["local", "remote"];
+                let default = if a.embedder_backend == "remote" { 1 } else { 0 };
                 let idx = select(
-                    "Embedding backend (local = on-device Candle, http = bring-your-own-key)",
+                    "Embedding backend (local = on-device Candle, remote = bring-your-own-key)",
                     &items,
                     default,
                 );
@@ -135,10 +135,10 @@ fn render_step(step: SetupStep, a: &mut SetupAnswers) -> Result<(), Box<dyn std:
                 }
             } else {
                 println!(
-                    "{} local embedding is not supported on this device, using HTTP embedder.",
+                    "{} local embedding is not supported on this device, using remote embedder.",
                     console::style("→").yellow()
                 );
-                a.embedder_backend = "http".to_string();
+                a.embedder_backend = "remote".to_string();
             }
         }
         SetupStep::LocalModel => {

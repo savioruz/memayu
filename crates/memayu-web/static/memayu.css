@@ -204,6 +204,16 @@ body {
   grid-template-columns: repeat(1, minmax(0, 1fr));
 }
 
+.grid-cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (min-width: 640px) {
+  .sm\:grid-cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (min-width: 768px) {
   .md\:grid-cols-2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -358,6 +368,26 @@ body {
   margin-bottom: 0.5rem;
 }
 
+.my-3 {
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.my-4 {
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+}
+
+.my-6 {
+  margin-top: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.my-8 {
+  margin-top: 2rem;
+  margin-bottom: 2rem;
+}
+
 .mx-2 {
   margin-left: 0.5rem;
   margin-right: 0.5rem;
@@ -422,6 +452,14 @@ body {
 
 .max-w-xl {
   max-width: 36rem;
+}
+
+.max-w-2xl {
+  max-width: 42rem;
+}
+
+.max-w-3xl {
+  max-width: 48rem;
 }
 
 .max-w-xs {
@@ -1069,6 +1107,66 @@ pre {
   display: block;
 }
 
+.dropdown.w-full {
+  display: block;
+  width: 100%;
+}
+
+.dropdown.w-full .dropdown-content {
+  width: 100%;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+  max-height: 20rem;
+  overflow-y: auto;
+  border-radius: var(--mu-border-radius, 0.375rem);
+}
+
+.model-dropdown-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  padding: 0.625rem 0.875rem;
+  background-color: var(--mu-form-element-background-color, #ffffff);
+  border: var(--mu-border-width, 1px) solid var(--mu-form-element-border-color, #cbd5e1);
+  border-radius: var(--mu-border-radius, 0.375rem);
+  color: var(--mu-color, inherit);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.model-dropdown-trigger:hover,
+.model-dropdown-trigger:focus {
+  border-color: #0b3b60;
+  outline: none;
+}
+
+.model-option-item {
+  display: block;
+  padding: 0.75rem 0.875rem;
+  border-bottom: 1px solid var(--mu-muted-border-color, #202632);
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.model-option-item:last-child {
+  border-bottom: none;
+}
+
+.model-option-item:hover,
+.model-option-item.active {
+  background-color: rgba(11, 59, 96, 0.08);
+}
+
+.model-specs-card {
+  background-color: var(--mu-card-sectioning-background-color, #181c25);
+  border: 1px solid var(--mu-muted-border-color, #202632);
+  border-radius: var(--mu-border-radius, 0.375rem);
+  padding: 0.75rem 1rem;
+}
+
 .avatar {
   display: inline-flex;
 }
@@ -1116,6 +1214,10 @@ dialog.modal::backdrop,
   box-sizing: border-box;
 }
 
+.modal:not([open]) {
+  display: none !important;
+}
+
 .modal[open] {
   display: flex;
   align-items: center;
@@ -1149,12 +1251,9 @@ dialog.modal::backdrop,
 }
 
 .modal-backdrop {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 1;
+  position: fixed;
+  inset: 0;
+  z-index: -1;
 }
 
 .modal-backdrop button {
@@ -1173,10 +1272,162 @@ dialog.modal::backdrop,
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
-  margin-top: 1rem;
+  margin-top: 1.5rem;
 }
 
 .divider {
   height: 1px;
   background-color: var(--mu-muted-border-color, #202632);
+}
+
+/* ── Wizard Stepper & Choice Cards ── */
+.stepper {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  position: relative;
+  margin-bottom: 2.25rem;
+  padding: 0 1rem;
+}
+
+.step-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  text-align: center;
+}
+
+.step-circle {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50% !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  background-color: transparent;
+  border: 1.5px solid var(--mu-muted-border-color, #cbd5e1);
+  color: var(--mu-muted-color, #94a3b8);
+  transition: all 0.2s ease;
+}
+
+.step-item.active .step-circle {
+  background-color: #0b3b60;
+  border-color: #0b3b60;
+  color: #ffffff;
+  box-shadow: 0 1px 3px rgba(11, 59, 96, 0.2);
+}
+
+.step-item.completed .step-circle {
+  background-color: #0b3b60;
+  border-color: #0b3b60;
+  color: #ffffff;
+}
+
+.step-label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  margin-top: 0.5rem;
+  color: var(--mu-muted-color, #94a3b8);
+  transition: color 0.2s ease;
+}
+
+.step-item.active .step-label {
+  color: var(--mu-color, #0f172a);
+  font-weight: 700;
+}
+
+.step-item.completed .step-label {
+  color: var(--mu-color, #0f172a);
+  font-weight: 600;
+}
+
+/* Choice Cards (Radio / Selection) */
+.choice-card {
+  border: 1px solid var(--mu-muted-border-color, #e2e8f0);
+  background-color: var(--mu-card-sectioning-background-color, #ffffff);
+  border-radius: 0.5rem;
+  padding: 1.125rem 1rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: block;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.choice-card:hover {
+  border-color: #0b3b60;
+}
+
+.choice-card.selected,
+.choice-card:has(input[type="radio"]:checked) {
+  border: 2px solid #0b3b60;
+  background-color: rgba(11, 59, 96, 0.02);
+  padding: calc(1.125rem - 1px) calc(1rem - 1px);
+}
+
+.choice-card input[type="radio"] {
+  accent-color: #0b3b60;
+  margin-top: 0.125rem;
+  cursor: pointer;
+}
+
+.choice-title {
+  font-weight: 700;
+  font-size: 0.875rem;
+  display: block;
+  color: var(--mu-color, #0f172a);
+  line-height: 1.25;
+}
+
+.choice-desc {
+  font-size: 0.75rem;
+  color: var(--mu-muted-color, #64748b);
+  display: block;
+  margin-top: 0.35rem;
+  line-height: 1.45;
+}
+
+/* ── Wizard Layout Stability ── */
+.wizard-card {
+  min-height: 40rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.wizard-card .card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.wizard-form {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.wizard-content,
+.wizard-step-body {
+  flex: 1;
+  min-height: 28rem;
+}
+
+.wizard-footer {
+  margin-top: auto;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--mu-muted-border-color, #202632);
+}
+
+@media (max-width: 640px) {
+  .wizard-card {
+    min-height: auto;
+  }
+  .wizard-content,
+  .wizard-step-body {
+    min-height: auto;
+  }
 }

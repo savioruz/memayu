@@ -136,7 +136,7 @@ fn run_memayu_full(args: &[&str], port: u16, db: &std::path::Path) -> (i32, Stri
             format!("http://127.0.0.1:{port}"),
         )
         .env("MEMAYU_EMBEDDER_MODEL", "test-embed")
-        .env("MEMAYU_EMBEDDING_DIM", "3")
+        .env("MEMAYU_EMBEDDER_DIM", "3")
         .env("MEMAYU_LIBSQL_PATH", db)
         .env("MEMAYU_CONFIG", db.with_extension("toml")) // non-existent: keep env-only config
         .env_remove("MEMAYU_API_URL")

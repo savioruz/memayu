@@ -1,16 +1,15 @@
 mod cli;
 mod doctor;
 mod service;
-mod setup_flow;
 #[cfg(feature = "tui")]
 mod tui;
 #[cfg(feature = "tui")]
 mod tui_setup;
 mod wizard;
 
-#[cfg(feature = "web")]
-use memayu_config::StorageBackend;
 use memayu_config::{config_path, Config};
+#[cfg(feature = "web")]
+use memayu_config::{load_infrastructure, StorageBackend};
 #[cfg(feature = "web")]
 use memayu_core::MemoryService;
 #[cfg(feature = "web")]
@@ -67,8 +66,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(feature = "web")]
         "serve" => {
-            let config = Config::load()?;
-            cmd_serve(config).await?;
+            // On a fresh, unconfigured install there is no fully-valid config
+            // yet. Rather than fail hard, boot a minimal setup-only server
+            // (Category A only) so first-run setup can be completed in the
+            // browser (#55).
+            match Config::load() {
+                Ok(config) => cmd_serve(config).await?,
+                Err(_) => cmd_serve_setup().await?,
+            }
         }
         #[cfg(feature = "mcp")]
         "mcp" => {
@@ -265,9 +270,23 @@ async fn cmd_serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let service = build_web_service(&config).await?;
-
     let api_db = memayu_api::open_db(&config.storage).await?;
+
+    // #55: enforce config/DB precedence at boot. When the provider table is
+    // empty and the on-disk config is valid, seed it (so DB becomes
+    // authoritative); when empty, invalid, and no admin exists yet, this is an
+    // unconfigured first boot and we fail fast with an actionable error naming
+    // `memayu setup`.
+    memayu_api::ensure_provider_config(&api_db, &config)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    // DB-authoritative extraction mode, falling back to the config value on
+    // pre-seeding installs.
+    let extraction_mode = memayu_api::load_extraction_mode(&api_db, config.extraction_mode).await?;
+
+    let service = build_web_service(&config, extraction_mode).await?;
+
     let registry =
         memayu_api::load_registry(&api_db, config.llm.clone(), config.embedder.clone()).await?;
 
@@ -331,30 +350,39 @@ async fn cmd_mcp(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 // ── shared service builders ──
 
 /// Build the dashboard service via the API registry, which powers runtime
-/// provider reconfiguration in the web UI.
+/// provider reconfiguration in the web UI. `extraction_mode` is the resolved,
+/// DB-authoritative value (falling back to config when nothing is stored yet).
 #[cfg(feature = "web")]
 async fn build_web_service(
     config: &Config,
+    extraction_mode: memayu_core::ExtractionMode,
 ) -> Result<Arc<MemoryService>, Box<dyn std::error::Error>> {
-    use memayu_core::{EmbedderProvider, StorageProvider};
+    use memayu_core::StorageProvider;
 
     let api_db = memayu_api::open_db(&config.storage).await?;
     let registry =
         memayu_api::load_registry(&api_db, config.llm.clone(), config.embedder.clone()).await?;
 
     let embedder = memayu_api::EmbedderConfigProvider::new(registry.clone());
-    let detected_dim = match config.dimension {
-        Some(d) => d,
-        None => embedder.embed("dimension probe").await?.len(),
-    };
-    println!(
-        "[memayu] embedder dimension = {detected_dim} (from {} {})",
-        config.embedder.base_url, config.embedder.model
-    );
+    // Resolve the embedding dimension from config or the existing schema — never
+    // by probing the embedder. The probe happens only in `memayu setup` (#55).
+    let resolved_dim = service::resolve_storage_dimension(config).await?;
+    // A local backend has no base_url; printing one (even a stale leftover)
+    // is confusing, so it's omitted from the message for local backends.
+    match config.embedder.backend {
+        memayu_config::EmbedderBackend::Local => println!(
+            "[memayu] embedder dimension = {resolved_dim} (local backend, {})",
+            config.embedder.model
+        ),
+        memayu_config::EmbedderBackend::Remote => println!(
+            "[memayu] embedder dimension = {resolved_dim} (from {} {})",
+            config.embedder.base_url, config.embedder.model
+        ),
+    }
 
     let storage: Arc<dyn StorageProvider> = match config.storage.backend {
         StorageBackend::Libsql => Arc::new(
-            memayu_storage_libsql::LibsqlProvider::open(&config.storage.libsql_path, detected_dim)
+            memayu_storage_libsql::LibsqlProvider::open(&config.storage.libsql_path, resolved_dim)
                 .await?,
         ),
         StorageBackend::Postgres => Arc::new(
@@ -364,7 +392,7 @@ async fn build_web_service(
                     .database_url
                     .as_deref()
                     .ok_or("missing postgres url")?,
-                detected_dim,
+                resolved_dim,
             )
             .await?,
         ),
@@ -373,6 +401,26 @@ async fn build_web_service(
     let llm = memayu_api::LlmConfigProvider::new(registry.clone());
     Ok(Arc::new(
         MemoryService::new(storage, Arc::new(embedder), Arc::new(llm))
-            .with_extraction_mode(config.extraction_mode),
+            .with_extraction_mode(extraction_mode),
     ))
+}
+
+/// Boot a minimal, setup-only web server (#55). Used when the process starts
+/// with a valid infrastructure slice but no fully-valid config — a fresh,
+/// unconfigured install. Only `/setup` (and static assets) are served so the
+/// user can complete first-run setup in the browser; the full dashboard and API
+/// are reachable only after setup writes a config and the server is restarted.
+#[cfg(feature = "web")]
+async fn cmd_serve_setup() -> Result<(), Box<dyn std::error::Error>> {
+    let infra = load_infrastructure()?;
+    let api_db = memayu_api::open_db(&infra.storage).await?;
+    let app = memayu_web::build_setup_router(api_db);
+
+    let addr = format!("{}:{}", infra.bind_addr, infra.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    println!("[memayu] setup-only mode (no valid config): listening on {addr}");
+    println!("[memayu] complete first-run setup at http://{addr}/setup");
+    println!("[memayu] restart the server after setup to start the full dashboard");
+    axum::serve(listener, app).await?;
+    Ok(())
 }
