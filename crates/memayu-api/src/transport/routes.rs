@@ -115,6 +115,11 @@ pub fn build(
             middleware::auth_rate_limiter,
         ));
 
+    // Health probe (public — /api prefix) — intentionally outside every auth
+    // and rate-limit layer so process supervisors can poll it freely before
+    // setup is complete. It only reports readiness; it never mutates state.
+    let health_routes = Router::new().route("/api/health", get(handlers::health::get_health));
+
     // Provider config routes (protected by auth)
     let provider_routes = Router::new().route(
         "/api/providers",
@@ -158,6 +163,7 @@ pub fn build(
     // Merge public + protected — security headers + CORS + request ID on the outermost layer
     Router::new()
         .merge(auth_routes)
+        .merge(health_routes)
         .merge(docs_routes)
         .merge(protected)
         .layer(axum::middleware::from_fn(middleware::security_headers))

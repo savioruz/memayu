@@ -60,6 +60,34 @@ docker run --rm -p 8080:8080 \
   ghcr.io/savioruz/memayu:latest
 ```
 
+The server exposes an unauthenticated readiness endpoint at
+`GET /api/health`:
+
+```json
+{ "status": "setup_required" }
+```
+
+`setup_required` means the process is listening but not yet usable (first-run
+setup is incomplete — no admin account and/or no provider config). Once both
+exist it returns `{ "status": "ready" }`. Use this as the healthcheck target
+for Docker/systemd instead of treating "port is listening" as "server is
+usable".
+
+**Docker HEALTHCHECK** (add to a `Dockerfile` or `docker-compose.yml`):
+
+```dockerfile
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=5 \
+  CMD wget -q -O /dev/stdout http://127.0.0.1:8080/api/health | grep -q '"status":"ready"'
+```
+
+**systemd** (ExecStartPost waits for readiness before the unit is active):
+
+```ini
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do \
+  curl -fsS http://127.0.0.1:18080/api/health | grep -q "\"status\":\"ready\"" && exit 0; \
+  sleep 1; done; exit 1'
+```
+
 ## Usage
 
 ### CLI

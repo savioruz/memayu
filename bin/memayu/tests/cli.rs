@@ -50,13 +50,20 @@ fn start_mock_embedder() -> u16 {
     port
 }
 
-/// Like [`start_mock_embedder`] but derives a distinct embedding from each
-/// request's full body. Used by batch tests where every item must get its own
-/// vector so the storage layer doesn't treat them as duplicates and merge them.
+/// Like [`start_mock_embedder`] but returns a different, mutually orthogonal
+/// unit vector for each request. Used by batch tests where every item must get
+/// its own vector so the storage layer doesn't treat them as duplicates and
+/// merge them.
 fn start_distinct_embedder() -> u16 {
-    use std::hash::{Hash, Hasher};
+    use std::sync::{Arc, Mutex};
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind distinct embedder");
     let port = listener.local_addr().unwrap().port();
+    // Batch items are embedded sequentially (the service awaits each embed in
+    // order), so handing out mutually orthogonal unit vectors guarantees no two
+    // items ever exceed the raw dedupe threshold (0.98), no matter the run.
+    // A previous hash-of-request-body approach produced random [0,1]^3 vectors
+    // that occasionally collided above 0.98, flaking this test.
+    let next = Arc::new(Mutex::new(0usize));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
@@ -93,14 +100,13 @@ fn start_distinct_embedder() -> u16 {
                     Err(_) => break,
                 }
             }
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            buf.hash(&mut h);
-            let v = h.finish();
-            let emb = [
-                ((v & 0xffff) as f32) / 65535.0,
-                (((v >> 16) & 0xffff) as f32) / 65535.0,
-                (((v >> 32) & 0xffff) as f32) / 65535.0,
-            ];
+
+            // Orthogonal basis vectors, one per request in arrival order.
+            const AXES: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+            let mut idx = next.lock().unwrap();
+            let emb = AXES[*idx % AXES.len()];
+            *idx += 1;
+
             let body = format!(
                 r#"{{"data":[{{"embedding":[{:.6},{:.6},{:.6}]}}]}}"#,
                 emb[0], emb[1], emb[2]

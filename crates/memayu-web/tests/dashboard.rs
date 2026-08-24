@@ -5,7 +5,7 @@ use axum::http::{Request, StatusCode};
 use memayu_api::{open_db, ConfigRegistry, EmbedderConfigProvider, LlmConfigProvider};
 use memayu_config::StorageConfig;
 use memayu_core::{EmbedError, EmbedderProvider, ExtractionMode, MemoryService};
-use memayu_web::build_web_router;
+use memayu_web::{build_setup_router, build_web_router};
 use tower::util::ServiceExt;
 
 /// Deterministic fake embedder used to seed memories without network calls.
@@ -516,4 +516,33 @@ async fn home_paginates_memories_with_prev_next() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn setup_router_exposes_health() {
+    // The setup-only boot path must be healthcheckable too, so a fresh
+    // unconfigured instance reports `setup_required` even before the full
+    // dashboard/API router is mounted (issue #47).
+    let storage = test_storage_config();
+    let db = open_db(&storage).await.unwrap();
+    let app = build_setup_router(db);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 128)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        body.contains("\"status\":\"setup_required\""),
+        "unexpected health body: {body}"
+    );
 }
