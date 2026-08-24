@@ -6,10 +6,20 @@ mod pages;
 use axum::extract::FromRef;
 use axum::response::Redirect;
 use axum::routing::{get, post};
+use axum::Json;
 use axum::Router;
 use memayu_api::{ConfigRegistry, WebServices};
 use memayu_core::MemoryService;
 use std::sync::Arc;
+
+/// Unauthenticated health probe served in setup-only mode. Mirrors the
+/// `GET /api/health` route in the full API router so a fresh, unconfigured
+/// instance (where only the setup router is mounted) is still healthcheckable.
+async fn health(
+    axum::extract::State(services): axum::extract::State<WebServices>,
+) -> Json<memayu_api::HealthResponse> {
+    Json(services.health_status().await)
+}
 
 /// Web router state — the web crate never accesses DbClient directly.
 /// All data access goes through `WebServices` (the memayu-api service layer).
@@ -101,6 +111,7 @@ pub fn build_setup_router(db: memayu_api::DbClient) -> Router {
             "/setup",
             get(pages::setup::get_setup).post(pages::setup::post_setup),
         )
+        .route("/api/health", get(health))
         .route("/static/{*path}", get(assets::serve_static))
         .with_state(WebServices::new(db))
 }

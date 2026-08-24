@@ -981,4 +981,85 @@ mod tests {
         assert_eq!(json["embedder"]["base_url"], "");
         assert_eq!(json["embedder"]["api_key"], serde_json::Value::Null);
     }
+
+    // ── /api/health (issue #47) ──
+
+    #[tokio::test]
+    async fn health_is_unauthenticated_and_setup_required_on_fresh_instance() {
+        let app = build_test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "setup_required");
+    }
+
+    #[tokio::test]
+    async fn health_is_setup_required_with_admin_but_no_providers() {
+        let (app, _cookie) = setup_and_login().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "setup_required");
+    }
+
+    #[tokio::test]
+    async fn health_is_ready_after_setup_and_provider_config() {
+        let (app, cookie) = setup_and_login().await;
+
+        // Persist a provider row the same way the dashboard does.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(
+                        r#"{"embedder":{"backend":"local","base_url":"","api_key":null,"model":"mini"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+    }
 }

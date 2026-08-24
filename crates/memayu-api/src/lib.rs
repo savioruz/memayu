@@ -14,6 +14,7 @@ pub use modules::auth::model::User;
 pub use modules::auth::service::{
     expires_at_rfc3339, validate_password, SESSION_COOKIE, SESSION_DURATION_SECS,
 };
+pub use modules::health::dto::{HealthResponse, HealthStatus};
 pub use modules::providers::service::{
     ensure_provider_config, load_extraction_mode, load_registry, ConfigRegistry,
     EmbedderConfigProvider, LlmConfigProvider,

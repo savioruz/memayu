@@ -1,6 +1,6 @@
 FROM rust:alpine AS builder
 
-RUN apk add --no-cache musl-dev pkgconfig
+RUN apk add --no-cache musl-dev pkgconfig g++
 
 WORKDIR /app
 COPY . .
@@ -16,6 +16,7 @@ RUN apk add --no-cache ca-certificates && \
 COPY --from=builder /app/target/release/memayu /usr/local/bin/memayu
 
 ENV MEMAYU_LIBSQL_PATH=/data/memayu.db
+ENV MEMAYU_PORT=8080
 
 USER memayu
 WORKDIR /data

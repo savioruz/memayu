@@ -79,6 +79,15 @@ impl WebServices {
     }
 }
 
+// ── Health ──
+
+impl WebServices {
+    /// Compute the readiness status exposed by `GET /api/health`.
+    pub async fn health_status(&self) -> crate::modules::health::dto::HealthResponse {
+        crate::modules::health::service::status(&self.db).await
+    }
+}
+
 // ── Provider Config ──
 
 impl WebServices {
