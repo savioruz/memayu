@@ -412,3 +412,18 @@ fn print_memory(m: &Memory, json: bool) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// `memayu reset-password <new-password>` — recover a forgotten admin password.
+///
+/// Bypasses the login gate entirely and resets the admin account's password to
+/// the given value (validated against the shared policy). This is the
+/// documented recovery path for self-hosted instances.
+pub async fn cmd_reset_password(config: &Config, password: &str) -> Result<(), String> {
+    guard_local(config)?;
+    memayu_identity::reset_password(&config.storage, password)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("Admin password updated.");
+    println!("Use it to log in to the dashboard, then rotate it from /account if desired.");
+    Ok(())
+}

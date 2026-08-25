@@ -49,6 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = Config::load()?;
             run_cli(cli::cmd_delete(&config, args).await);
         }
+        // Account recovery: reset the admin password without the login gate.
+        "reset-password" => {
+            let config = Config::load()?;
+            let password = args.next().unwrap_or_default();
+            run_cli(cli::cmd_reset_password(&config, &password).await);
+        }
         // Diagnostics: never requires a fully valid config, so it can report
         // exactly what is wrong.
         "doctor" => {
@@ -230,6 +236,7 @@ fn usage() -> String {
     subcommands.push("list");
     subcommands.push("get");
     subcommands.push("delete");
+    subcommands.push("reset-password");
     subcommands.push("doctor");
     #[cfg(feature = "tui")]
     subcommands.push("tui");

@@ -641,3 +641,264 @@ async fn memory_detail_shows_full_long_content_and_metadata() {
     assert!(body_str.contains("Created:"), "stdout: {body_str}");
     assert!(body_str.contains("Updated:"), "stdout: {body_str}");
 }
+
+#[tokio::test]
+async fn account_page_changes_password_and_email() {
+    // Issue #50: the /account page lets the logged-in admin change password
+    // (requiring the current one) and change email.
+    let (app, _db, _storage) = build_raw_test_app().await;
+
+    // Set up admin + capture session cookie.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/setup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "email=admin@memayu.test&password=Secret12&confirm=Secret12",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // GET /account renders both forms.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/accounts")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 256)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(body_str.contains("Current email:"), "stdout: {body_str}");
+    assert!(body_str.contains("admin@memayu.test"), "stdout: {body_str}");
+
+    // Change the password with the correct current password.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/accounts/password")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", &cookie)
+                .body(Body::from(
+                    "current_password=Secret12&new_password=NewSecret9&confirm=NewSecret9",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 256)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(body_str.contains("Password updated."), "stdout: {body_str}");
+
+    // Old password no longer logs in; new password does.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("email=admin@memayu.test&password=Secret12"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 256)
+        .await
+        .unwrap();
+    let old_body = String::from_utf8_lossy(&body);
+    assert!(
+        old_body.contains("Invalid credentials."),
+        "old password must be rejected, got: {old_body}"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("email=admin@memayu.test&password=NewSecret9"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "new password logs in");
+
+    // Change the email.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/accounts/email")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", &cookie)
+                .body(Body::from("email=newadmin@memayu.test"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 256)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(body_str.contains("Email updated."), "stdout: {body_str}");
+    assert!(
+        body_str.contains("newadmin@memayu.test"),
+        "stdout: {body_str}"
+    );
+
+    // The new email logs in (with the new password).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("email=newadmin@memayu.test&password=NewSecret9"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "new email logs in");
+
+    // Wrong current password is rejected with a clear error.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/accounts/password")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", &cookie)
+                .body(Body::from(
+                    "current_password=WrongPass1&new_password=Another9&confirm=Another9",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 256)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("current password is incorrect"),
+        "stdout: {body_str}"
+    );
+}
+
+#[tokio::test]
+async fn providers_page_renders_local_models_and_persists() {
+    let (app, db, _) = build_raw_test_app().await;
+
+    // Setup admin to obtain session cookie
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/setup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "email=admin@memayu.test&password=Secret12&confirm=Secret12",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // GET /providers — verify shared local model catalog options are present
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/providers")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 256)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+
+    for m in memayu_setup::LOCAL_MODELS {
+        assert!(body_str.contains(m.name), "missing model name {}", m.name);
+        assert!(body_str.contains(m.id), "missing model id {}", m.id);
+    }
+    assert!(body_str.contains("model-dropdown-trigger"));
+    assert!(body_str.contains("Embedding vector dimension:"));
+
+    // POST /providers with local backend
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/providers")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", &cookie)
+                .body(Body::from(
+                    "provider=embedder&backend=local&model=sentence-transformers%2Fall-MiniLM-L6-v2",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 256)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(body_str.contains("Saved."), "stdout: {body_str}");
+
+    // Verify DB normalized local config (base_url and api_key are empty)
+    let configs = db.provider_configs().await.unwrap();
+    let (backend, base_url, api_key, model) = configs.get("embedder").unwrap();
+    assert_eq!(backend, "local");
+    assert_eq!(base_url, "");
+    assert_eq!(api_key, "");
+    assert_eq!(model, "sentence-transformers/all-MiniLM-L6-v2");
+}

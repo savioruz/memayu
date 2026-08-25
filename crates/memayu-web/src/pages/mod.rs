@@ -1,3 +1,4 @@
+pub mod account;
 pub mod api_keys;
 pub mod home;
 pub mod login;

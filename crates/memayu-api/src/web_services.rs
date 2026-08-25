@@ -56,6 +56,23 @@ impl WebServices {
     pub async fn auth_resolve_session(&self, token: &str) -> Result<String, String> {
         auth_service::resolve_session(&self.db, token).await
     }
+
+    /// Change the logged-in user's password after verifying the current one.
+    pub async fn auth_change_password(
+        &self,
+        user_id: &str,
+        current_password: &str,
+        new_password: &str,
+        confirm: &str,
+    ) -> Result<(), ApiError> {
+        auth_service::change_password(&self.db, user_id, current_password, new_password, confirm)
+            .await
+    }
+
+    /// Change the logged-in user's email.
+    pub async fn auth_change_email(&self, user_id: &str, email: &str) -> Result<String, ApiError> {
+        auth_service::change_email(&self.db, user_id, email).await
+    }
 }
 
 // ── API Keys ──

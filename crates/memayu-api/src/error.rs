@@ -20,6 +20,7 @@ pub struct ApiErrorBody {
 /// Transport-agnostic API error — no axum types in the struct.
 /// Transport layer is responsible for converting `status` (u16) into
 /// the appropriate HTTP response.
+#[derive(Debug)]
 pub struct ApiError {
     pub status: u16,
     pub error: String,
