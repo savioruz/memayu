@@ -76,6 +76,7 @@ pub fn build_web_router(
         .route("/", get(|| async { Redirect::permanent("/home") }))
         .route("/home", get(pages::home::get_home))
         .route("/home/list", get(pages::home::get_home_list))
+        .route("/home/memory/{id}", get(pages::memory::get_memory_detail))
         .route("/home/search", post(pages::home::post_search))
         .route("/requests", get(pages::requests::get_requests))
         .route(

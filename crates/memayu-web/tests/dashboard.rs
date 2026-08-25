@@ -546,3 +546,98 @@ async fn setup_router_exposes_health() {
         "unexpected health body: {body}"
     );
 }
+
+#[tokio::test]
+async fn memory_detail_shows_full_long_content_and_metadata() {
+    // Issue #56: the memory detail view must render the full, untruncated
+    // content even when it is multi-KB, plus created_at/updated_at and metadata,
+    // without any clipping.
+    let (app, db, storage) = build_raw_test_app().await;
+
+    // Set up admin + capture session cookie.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/setup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "email=admin@memayu.test&password=Secret12&confirm=Secret12",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Resolve the admin's user id from the session.
+    let token = cookie
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("memayu_session="))
+        .unwrap()
+        .to_string();
+    let user_id = memayu_api::WebServices::new(db)
+        .auth_resolve_session(&token)
+        .await
+        .unwrap();
+
+    // Seed one memory with content long enough that the list row would
+    // truncate it, plus some metadata.
+    let long_content = format!("start {}", "x".repeat(20_000));
+    let now = chrono::Utc::now();
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert("source".to_string(), "detail-test".to_string());
+    metadata.insert("tag".to_string(), "long".to_string());
+    storage
+        .save_memory(&memayu_core::Memory {
+            id: "detail-mem-1".to_string(),
+            user_id: user_id.clone(),
+            content: long_content.clone(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    // Open the detail modal fragment for this memory.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/home/memory/detail-mem-1")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+
+    // The full content is present, not truncated.
+    assert!(
+        body_str.contains(&long_content),
+        "detail view must contain the full content"
+    );
+    assert!(body_str.contains("memory-detail-detail-mem-1"));
+    // Metadata keys and values are visible (key and value render in sibling spans).
+    assert!(body_str.contains("source: "), "stdout: {body_str}");
+    assert!(body_str.contains("detail-test"), "stdout: {body_str}");
+    assert!(body_str.contains("tag: "), "stdout: {body_str}");
+    assert!(body_str.contains(">long<"), "stdout: {body_str}");
+    // Created/updated timestamps render.
+    assert!(body_str.contains("Created:"), "stdout: {body_str}");
+    assert!(body_str.contains("Updated:"), "stdout: {body_str}");
+}

@@ -115,6 +115,8 @@ pub async fn get_home(
             }
             // Memory list (swappable HTMX fragment)
             (list_fragment(&page))
+            // HTMX target for the memory-detail modal (loaded on row click).
+            div id="memory-detail-target" {}
             // Pager controls (kept outside the swap target): total on the left,
             // Prev/Next on the right.
             div class="flex items-center justify-between gap-2 mt-4 w-full" {
@@ -176,7 +178,11 @@ fn list_fragment(page: &MemoryPage) -> maud::Markup {
                         }
                         tbody {
                             @for mem in &page.memories {
-                                tr {
+                                tr class="cursor-pointer hover:bg-base-200"
+                                    hx-get=(format!("/home/memory/{}", mem.id))
+                                    hx-target="#memory-detail-target"
+                                    hx-swap="innerHTML"
+                                    title="View full memory" {
                                     td {
                                         p class="truncate" { (mem.content) }
                                     }
@@ -269,6 +275,7 @@ pub async fn post_search(
             })?
             .into_iter()
             .map(|m| SearchResultRow {
+                id: m.id.clone(),
                 content: m.content,
                 created_at: m.created_at,
                 score: None,
@@ -286,6 +293,7 @@ pub async fn post_search(
             })?
             .into_iter()
             .map(|(m, score)| SearchResultRow {
+                id: m.id.clone(),
                 content: m.content,
                 created_at: m.created_at,
                 score: Some(score),
@@ -327,7 +335,11 @@ pub async fn post_search(
                         }
                         tbody {
                             @for r in &results {
-                                tr {
+                                tr class="cursor-pointer hover:bg-base-200"
+                                    hx-get=(format!("/home/memory/{}", r.id))
+                                    hx-target="#memory-detail-target"
+                                    hx-swap="innerHTML"
+                                    title="View full memory" {
                                     td {
                                         p class="truncate" { (r.content) }
                                     }
@@ -346,12 +358,15 @@ pub async fn post_search(
                         }
                     }
                 }
+                // HTMX target for the memory-detail modal (loaded on row click).
+                div id="memory-detail-target" {}
             }
         },
     )))
 }
 
 struct SearchResultRow {
+    id: String,
     content: String,
     created_at: chrono::DateTime<chrono::Utc>,
     score: Option<f32>,
