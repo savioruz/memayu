@@ -36,6 +36,22 @@ impl HttpLlmProvider {
         )
         .await
     }
+
+    /// Issue a minimal, real completion through the provider and return any
+    /// error. A success here means the endpoint is reachable, the key is
+    /// accepted, and the configured model answers — the same signal the real
+    /// extraction path relies on, without consulting any `/models` listing.
+    pub async fn probe(&self) -> Result<(), String> {
+        let messages = [
+            memayu_core::Message::user(
+                "Reply with exactly the JSON: {\"decision\":\"add\",\"memory_id\":null,\"content\":\"ok\"}",
+            ),
+        ];
+        self.extract(&messages)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
