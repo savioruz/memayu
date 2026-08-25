@@ -124,8 +124,29 @@ to the previous field or step, `↑`/`↓` pick a select option, and `Esc`/`Ctrl
 cancels.
 
 Other subcommands: `memayu config show|check`, `memayu add`, `memayu search`,
-`memayu list`, `memayu get`, `memayu delete`, `memayu doctor`, plus
-`memayu serve` (web, `web` feature) and `memayu mcp` (`mcp` feature).
+`memayu list`, `memayu get`, `memayu delete`, `memayu reset-password`,
+`memayu doctor`, plus `memayu serve` (web, `web` feature) and `memayu mcp`
+(`mcp` feature).
+
+#### Account management
+
+The web dashboard exposes an **Account** page (`/accounts`) where the logged-in
+admin can change the email address and change the password (the current
+password is required to confirm the change). A changed password takes effect
+on the next login; the old password no longer works.
+
+If the admin forgets their password entirely (and cannot log in to open
+`/accounts`), reset it from the terminal:
+
+```bash
+memayu reset-password 'NewHorse-Staple-99!'
+```
+
+This bypasses the login gate and sets a fresh password for the single admin
+account, validating it against the same policy the UI enforces. It runs against
+the same `config.toml` / `MEMAYU_*` env settings the server uses, so it works
+for both libsql and Postgres backends. After resetting, log in with the new
+password and rotate it from `/accounts` if you like.
 
 ### HTTP API
 

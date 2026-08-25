@@ -168,7 +168,7 @@ pub const LOCAL_MODELS: &[LocalModelSpec] = &[
         min_ram_mb: 300,
         min_disk_mb: 500,
         cpu_notes: "Very fast, ARMv8 OK",
-        langs: "English-only",
+        langs: "English",
     },
     LocalModelSpec {
         id: "BAAI/bge-small-en-v1.5",
@@ -179,18 +179,18 @@ pub const LOCAL_MODELS: &[LocalModelSpec] = &[
         min_ram_mb: 350,
         min_disk_mb: 600,
         cpu_notes: "Fast, ARMv8 OK",
-        langs: "English-only",
+        langs: "English",
     },
     LocalModelSpec {
         id: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         name: "paraphrase-multilingual-MiniLM-L12-v2",
-        dim: 768,
+        dim: 384,
         fp32_size_mb: 470,
         int8_size_mb: 120,
         min_ram_mb: 700,
         min_disk_mb: 1200,
         cpu_notes: "Slower (2× layers), ARMv8 OK",
-        langs: "50+ langs (incl. id)",
+        langs: "50+ langs",
     },
     LocalModelSpec {
         id: "nomic-ai/nomic-embed-text-v1.5",
@@ -201,7 +201,7 @@ pub const LOCAL_MODELS: &[LocalModelSpec] = &[
         min_ram_mb: 800,
         min_disk_mb: 1400,
         cpu_notes: "Heavier, slower on Pi",
-        langs: "English-strong, some multilingual",
+        langs: "Multilingual",
     },
 ];
 

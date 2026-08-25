@@ -236,6 +236,10 @@ body {
   gap: 0.25rem;
 }
 
+.gap-2 {
+  gap: 0.5rem;
+}
+
 .gap-3 {
   gap: 0.75rem;
 }
@@ -248,7 +252,23 @@ body {
   gap: 1.5rem;
 }
 
+.gap-x-2 {
+  column-gap: 0.5rem;
+}
+
+.gap-x-3 {
+  column-gap: 0.75rem;
+}
+
 /* ── Spacing & Margins ── */
+.space-x-2>*+* {
+  margin-left: 0.5rem;
+}
+
+.space-x-3>*+* {
+  margin-left: 0.75rem;
+}
+
 .space-y-4>*+* {
   margin-top: 1rem;
 }
@@ -498,9 +518,35 @@ body {
   width: 3rem;
 }
 
+.size-4 {
+  width: 1rem;
+  height: 1rem;
+}
+
 .size-5 {
   width: 1.25rem;
   height: 1.25rem;
+}
+
+.size-6 {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.inline-block {
+  display: inline-block;
+}
+
+.inline-flex {
+  display: inline-flex;
+}
+
+.w-fit {
+  width: fit-content;
+}
+
+.w-auto {
+  width: auto;
 }
 
 .overflow-x-auto {
@@ -688,7 +734,8 @@ pre {
   color: var(--mu-color, #c2c7d0);
 }
 
-.input {
+.input,
+.select {
   width: 100%;
   height: 2.25rem;
   padding: 0 0.75rem;
@@ -700,7 +747,8 @@ pre {
   box-sizing: border-box;
 }
 
-.input:focus {
+.input:focus,
+.select:focus {
   border-color: var(--mu-form-element-active-border-color, #0172ad);
   outline: none;
 }

@@ -92,6 +92,16 @@ pub fn build_web_router(
             "/api-keys/{id}/delete",
             post(pages::api_keys::delete_api_key),
         )
+        .route("/accounts", get(pages::account::get_account))
+        .route("/accounts/email", post(pages::account::post_account_email))
+        .route(
+            "/accounts/password",
+            post(pages::account::post_account_password),
+        )
+        .route(
+            "/account",
+            get(|| async { Redirect::permanent("/accounts") }),
+        )
         .route("/static/{*path}", get(assets::serve_static))
         .with_state(state)
 }

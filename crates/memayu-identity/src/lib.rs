@@ -179,6 +179,40 @@ pub async fn bootstrap(config: &StorageConfig) -> Result<String, IdentityError> 
     Ok(admin_id)
 }
 
+/// Reset the admin password for a self-hosted instance, bypassing the login
+/// gate entirely (the recovery path for a forgotten password). Validates the
+/// new password against the shared policy and writes a fresh salt + hash.
+pub async fn reset_password(config: &StorageConfig, password: &str) -> Result<(), IdentityError> {
+    if let Some(msg) = validate_password(password) {
+        return Err(IdentityError::Validation(msg));
+    }
+    let admin_id = resolve_self_hosted_account_id(config).await?;
+    let salt = new_salt();
+    let hash = hash_password(&salt, password);
+    match config.backend {
+        StorageBackend::Libsql => {
+            let conn = open_libsql(config).await?;
+            conn.execute(
+                "UPDATE users SET password = ?1, salt = ?2 WHERE id = ?3",
+                (hash.as_str(), salt.as_str(), admin_id.as_str()),
+            )
+            .await
+            .map_err(|e| IdentityError::Db(format!("reset password: {e}")))?;
+        }
+        StorageBackend::Postgres => {
+            let pool = open_postgres(config).await?;
+            sqlx::query("UPDATE users SET password = $1, salt = $2 WHERE id = $3")
+                .bind(hash.as_str())
+                .bind(salt.as_str())
+                .bind(admin_id.as_str())
+                .execute(&pool)
+                .await
+                .map_err(|e| IdentityError::Db(format!("reset password: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
 // ── password rules / hashing ──
 //
 // These mirror the rules enforced by the web `POST /api/auth/setup` flow so
@@ -858,6 +892,65 @@ mod tests {
             hash_password(&salt, "Correct-Horse-Battery-Staple-42!")
         );
         assert_eq!(is_admin, 1);
+    }
+
+    #[tokio::test]
+    async fn reset_password_updates_hash_and_validates() {
+        let path = temp_db();
+        let config = config_for(&path);
+        let admin = create_admin_account(
+            &config,
+            "admin@example.com",
+            "Correct-Horse-Battery-Staple-42!",
+            "Correct-Horse-Battery-Staple-42!",
+        )
+        .await
+        .unwrap();
+
+        // Reset to a new password.
+        reset_password(&config, "NewHorse-Staple-99!")
+            .await
+            .unwrap();
+
+        // The stored row now verifies against the new password.
+        let conn = libsql::Builder::new_local(path.display().to_string())
+            .build()
+            .await
+            .unwrap()
+            .connect()
+            .unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT password, salt FROM users WHERE id = ?1",
+                vec![admin.as_str()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let stored_hash: String = row.get(0).unwrap();
+        let salt: String = row.get(1).unwrap();
+        assert_eq!(stored_hash, hash_password(&salt, "NewHorse-Staple-99!"));
+        assert_ne!(
+            stored_hash,
+            hash_password(&salt, "Correct-Horse-Battery-Staple-42!"),
+            "old password must no longer verify"
+        );
+
+        // Weak password is rejected.
+        let err = reset_password(&config, "weak").await.unwrap_err();
+        assert_eq!(
+            err,
+            IdentityError::Validation("Password must be at least 8 characters.")
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_password_errors_when_no_admin() {
+        let config = config_for(&temp_db());
+        let err = reset_password(&config, "NewHorse-Staple-99!")
+            .await
+            .unwrap_err();
+        assert_eq!(err, IdentityError::NoAdminAccount);
     }
 
     #[tokio::test]

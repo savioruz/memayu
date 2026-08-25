@@ -185,6 +185,88 @@ pub async fn logout(db: &DbClient, token: Option<&str>) -> Result<AuthResponse, 
     })
 }
 
+/// Change the password for `user_id`, requiring the current password to
+/// confirm. Validates the new password and that it matches the confirmation.
+pub async fn change_password(
+    db: &DbClient,
+    user_id: &str,
+    current_password: &str,
+    new_password: &str,
+    confirm: &str,
+) -> Result<(), ApiError> {
+    let user = db
+        .find_user_by_id(user_id)
+        .await
+        .map_err(|e| ApiError {
+            status: 500,
+            error: "internal_error".into(),
+            message: e,
+        })?
+        .ok_or_else(|| ApiError {
+            status: 401,
+            error: "unauthorized".into(),
+            message: "account not found".into(),
+        })?;
+
+    if hash_password(&user.salt, current_password) != user.password {
+        return Err(ApiError {
+            status: 400,
+            error: "bad_request".into(),
+            message: "current password is incorrect".into(),
+        });
+    }
+    if let Some(msg) = validate_password(new_password) {
+        return Err(ApiError::bad_request(msg));
+    }
+    if new_password != confirm {
+        return Err(ApiError::bad_request("passwords do not match"));
+    }
+
+    let salt = new_salt();
+    let hash = hash_password(&salt, new_password);
+    let ok = db
+        .update_password(user_id, &hash, &salt)
+        .await
+        .map_err(|e| ApiError {
+            status: 500,
+            error: "internal_error".into(),
+            message: e,
+        })?;
+    if !ok {
+        return Err(ApiError {
+            status: 401,
+            error: "unauthorized".into(),
+            message: "account not found".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Change the email for `user_id`.
+pub async fn change_email(db: &DbClient, user_id: &str, email: &str) -> Result<String, ApiError> {
+    let email = email.trim();
+    if email.is_empty() {
+        return Err(ApiError::bad_request("email is required"));
+    }
+    // The `users.email` column is UNIQUE; a duplicate returns a DB error below.
+    let ok = db
+        .update_email(user_id, email)
+        .await
+        .map_err(|e| ApiError {
+            status: 500,
+            error: "internal_error".into(),
+            message: e,
+        })?;
+    if !ok {
+        return Err(ApiError {
+            status: 401,
+            error: "unauthorized".into(),
+            message: "account not found".into(),
+        });
+    }
+    Ok(email.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +378,143 @@ mod tests {
         let ts = expires_at_rfc3339(3600);
         // Should parse back without error (chrono format test)
         assert!(chrono::DateTime::parse_from_rfc3339(&ts).is_ok());
+    }
+
+    // ── change_password / change_email (issue #50) ──
+
+    async fn mem_db_with_admin() -> (DbClient, String) {
+        let storage = memayu_config::StorageConfig {
+            backend: memayu_config::StorageBackend::Libsql,
+            libsql_path: ":memory:".to_string(),
+            database_url: None,
+        };
+        let db = DbClient::open(&storage).await.unwrap();
+        db.init().await.unwrap();
+        let salt = new_salt();
+        let hash = hash_password(&salt, "OldPass1");
+        db.create_user("admin@example.com", &hash, &salt)
+            .await
+            .unwrap();
+        let admin_id = db.find_user("admin@example.com").await.unwrap().unwrap().id;
+        (db, admin_id)
+    }
+
+    #[tokio::test]
+    async fn change_password_updates_and_old_password_rejected() {
+        let (db, admin_id) = mem_db_with_admin().await;
+        match change_password(&db, &admin_id, "OldPass1", "NewPass2", "NewPass2").await {
+            Ok(()) => {}
+            Err(e) => panic!("change_password failed: {}", e.message),
+        }
+
+        // Old password no longer works for login.
+        let login_old = match login(
+            &db,
+            &LoginRequest {
+                email: "admin@example.com".into(),
+                password: "OldPass1".into(),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("old password must be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(login_old.status, 401);
+
+        // New password works.
+        let login_new = login(
+            &db,
+            &LoginRequest {
+                email: "admin@example.com".into(),
+                password: "NewPass2".into(),
+            },
+        )
+        .await
+        .expect("new password must work");
+        assert_eq!(login_new.0.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_wrong_current_password() {
+        let (db, admin_id) = mem_db_with_admin().await;
+        let err = change_password(&db, &admin_id, "Wrong1", "NewPass2", "NewPass2")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.message, "current password is incorrect");
+
+        // Old password still works (nothing changed).
+        let login_old = login(
+            &db,
+            &LoginRequest {
+                email: "admin@example.com".into(),
+                password: "OldPass1".into(),
+            },
+        )
+        .await
+        .expect("old password must still work");
+        assert_eq!(login_old.0.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_weak_and_mismatched_new_password() {
+        let (db, admin_id) = mem_db_with_admin().await;
+        let weak = change_password(&db, &admin_id, "OldPass1", "weak", "weak")
+            .await
+            .unwrap_err();
+        assert_eq!(weak.status, 400);
+        assert_eq!(weak.message, "Password must be at least 8 characters.");
+
+        let mismatch = change_password(&db, &admin_id, "OldPass1", "NewPass2", "OtherPass3")
+            .await
+            .unwrap_err();
+        assert_eq!(mismatch.status, 400);
+        assert_eq!(mismatch.message, "passwords do not match");
+    }
+
+    #[tokio::test]
+    async fn change_email_updates_and_is_used_by_login() {
+        let (db, admin_id) = mem_db_with_admin().await;
+        let new_email = match change_email(&db, &admin_id, "new@example.com").await {
+            Ok(e) => e,
+            Err(e) => panic!("change_email failed: {}", e.message),
+        };
+        assert_eq!(new_email, "new@example.com");
+
+        // The new email is what login resolves.
+        let login_new = login(
+            &db,
+            &LoginRequest {
+                email: "new@example.com".into(),
+                password: "OldPass1".into(),
+            },
+        )
+        .await
+        .expect("new email must work");
+        assert_eq!(login_new.0.status, "ok");
+
+        // The old email no longer resolves.
+        let login_old = match login(
+            &db,
+            &LoginRequest {
+                email: "admin@example.com".into(),
+                password: "OldPass1".into(),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("old email must be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(login_old.status, 401);
+    }
+
+    #[tokio::test]
+    async fn change_email_rejects_empty() {
+        let (db, admin_id) = mem_db_with_admin().await;
+        let err = change_email(&db, &admin_id, "   ").await.unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.message, "email is required");
     }
 }

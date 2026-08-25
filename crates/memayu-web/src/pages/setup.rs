@@ -222,7 +222,6 @@ fn setup_form(a: &SetupAnswers, error: Option<&str>) -> maud::Markup {
                                         x-on:click="dropdown_open = !dropdown_open" {
                                         div class="flex items-center gap-2 flex-1 min-w-0" {
                                             span class="font-bold text-sm truncate" x-text="local_model_name" { (initial_model_name) }
-                                            span class="badge badge-sm badge-outline font-mono text-xs" x-text="local_dim + 'd'" { (initial_dim) "d" }
                                             span class="text-xs opacity-60 hidden sm:inline" x-text="'~' + local_int8 + ' MB (q8)'" { "~" (initial_int8) " MB (q8)" }
                                         }
                                         svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 opacity-60 ml-2 shrink-0 transition-transform" x-bind:class="{ 'rotate-180': dropdown_open }" fill="none" viewBox="0 0 24 24" stroke="currentColor" {
@@ -240,21 +239,19 @@ fn setup_form(a: &SetupAnswers, error: Option<&str>) -> maud::Markup {
                                                 div class="flex items-center justify-between" {
                                                     span class="font-bold text-sm text-base-content" { (m.name) }
                                                     div class="flex items-center gap-1.5" {
-                                                        span class="badge badge-sm font-mono text-xs font-semibold" { (m.dim) "d" }
+                                                        span class="badge badge-sm font-mono text-xs font-semibold" { (m.dim) "D" }
                                                         span class="badge badge-sm badge-outline text-xs" { (m.langs) }
                                                     }
                                                 }
-                                                div class="grid grid-cols-3 gap-2 text-xs text-base-content/70 mt-1.5 pt-1.5 border-t border-base-300/40" {
-                                                    span { "💾 ~" (m.int8_size_mb) " MB (q8) / ~" (m.fp32_size_mb) " MB" }
-                                                    span { "🧠 Min ~" (m.min_ram_mb) " MB RAM" }
-                                                    span class="text-right" { "⚡ " (m.cpu_notes) }
+                                                div class="text-xs text-base-content/60 mt-1" {
+                                                    "~" (m.int8_size_mb) "MB · min " (m.min_ram_mb) "MB RAM"
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                            div class="flex items-center gap-2 text-xs text-base-content/60 my-3" {
+                            div class="flex items-center gap-3 text-xs text-base-content/60 my-3" {
                                 span { "Embedding vector dimension:" }
                                 span class="badge badge-outline text-xs font-mono font-semibold" x-text="local_dim" { (embedding_dimension(a).unwrap_or(initial_dim as usize)) }
                             }

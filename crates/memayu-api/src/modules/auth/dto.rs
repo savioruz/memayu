@@ -13,6 +13,18 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+    pub confirm: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangeEmailRequest {
+    pub email: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub status: String,

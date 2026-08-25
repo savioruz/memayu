@@ -129,6 +129,102 @@ impl DbClient {
         }
     }
 
+    pub async fn find_user_by_id(&self, user_id: &str) -> Result<Option<User>, String> {
+        match self {
+            DbClient::Libsql(conn) => {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, email, password, salt FROM users WHERE id = ?1",
+                        vec![user_id],
+                    )
+                    .await
+                    .map_err(|e| format!("find user by id: {e}"))?;
+                if let Some(row) = rows.next().await.map_err(|e| format!("read user: {e}"))? {
+                    Ok(Some(User {
+                        id: row.get(0).map_err(|e| format!("id: {e}"))?,
+                        email: row.get(1).map_err(|e| format!("email: {e}"))?,
+                        password: row.get(2).map_err(|e| format!("password: {e}"))?,
+                        salt: row.get(3).map_err(|e| format!("salt: {e}"))?,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            DbClient::Postgres(pool) => {
+                let row = sqlx::query_as::<_, (String, String, String, String)>(
+                    "SELECT id, email, password, salt FROM users WHERE id = $1",
+                )
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| format!("find user by id: {e}"))?;
+                Ok(row.map(|(id, email, password, salt)| User {
+                    id,
+                    email,
+                    password,
+                    salt,
+                }))
+            }
+        }
+    }
+
+    /// Update a user's password hash + salt. Returns `false` when the row does
+    /// not exist (so the caller can decide whether that is an error).
+    pub async fn update_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        salt: &str,
+    ) -> Result<bool, String> {
+        match self {
+            DbClient::Libsql(conn) => {
+                let res = conn
+                    .execute(
+                        "UPDATE users SET password = ?1, salt = ?2 WHERE id = ?3",
+                        (password_hash, salt, user_id),
+                    )
+                    .await
+                    .map_err(|e| format!("update password: {e}"))?;
+                Ok(res > 0)
+            }
+            DbClient::Postgres(pool) => {
+                let res = sqlx::query("UPDATE users SET password = $1, salt = $2 WHERE id = $3")
+                    .bind(password_hash)
+                    .bind(salt)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("update password: {e}"))?;
+                Ok(res.rows_affected() > 0)
+            }
+        }
+    }
+
+    /// Update a user's email. Returns `false` when the row does not exist.
+    pub async fn update_email(&self, user_id: &str, email: &str) -> Result<bool, String> {
+        match self {
+            DbClient::Libsql(conn) => {
+                let res = conn
+                    .execute(
+                        "UPDATE users SET email = ?1 WHERE id = ?2",
+                        (email, user_id),
+                    )
+                    .await
+                    .map_err(|e| format!("update email: {e}"))?;
+                Ok(res > 0)
+            }
+            DbClient::Postgres(pool) => {
+                let res = sqlx::query("UPDATE users SET email = $1 WHERE id = $2")
+                    .bind(email)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("update email: {e}"))?;
+                Ok(res.rows_affected() > 0)
+            }
+        }
+    }
+
     // ── Sessions ──
 
     pub async fn create_session(
