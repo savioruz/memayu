@@ -1,0 +1,60 @@
+# Memayu — Docker Compose example
+#
+# Runs memayu serve in a container with restart-on-failure/reboot and a
+# non-destructive `/api/health` healthcheck, mirroring the Dockerfile and the
+# README "Docker" example.
+#
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose ps
+#
+# The container stores its database at /data/memayu.db (see the Dockerfile's
+# MEMAYU_LIBSQL_PATH), which is kept in the `memayu-data` named volume below so
+# the store survives container recreation and upgrades.
+#
+# Configure via the `environment:` block. Everything is optional except the
+# provider keys/model you plan to use; the README uses OpenAI-compatible
+# defaults. For a local (on-device) embedder set instead:
+#
+#     MEMAYU_EMBEDDER_BACKEND: local
+#     MEMAYU_EMBEDDER_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+#     MEMAYU_EMBEDDER_DIM: "768"
+#
+# The port on the left of `8080:8080` is the host port; change it if occupied.
+#
+# Healthcheck: the image is alpine, so `wget` (busybox) is available. The service
+# is marked healthy only once /api/health returns {"status":"ready"} (i.e. first-
+# run setup has completed). Before that it reports "unhealthy" — complete setup
+# at http://localhost:8080/setup, then the container transitions to healthy.
+
+services:
+  memayu:
+    image: ghcr.io/savioruz/memayu:latest
+    container_name: memayu
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Storage (libsql embedded database under the named volume below).
+      MEMAYU_STORAGE_BACKEND: libsql
+      MEMAYU_LIBSQL_PATH: /data/memayu.db
+      # Provider config (OpenAI-compatible; adjust to your provider/proxy).
+      # MEMAYU_LLM_BASE_URL: https://api.openai.com/v1
+      # MEMAYU_LLM_API_KEY: sk-...
+      # MEMAYU_LLM_MODEL: gpt-4o-mini
+      # MEMAYU_EMBEDDER_BASE_URL: https://api.openai.com/v1
+      # MEMAYU_EMBEDDER_API_KEY: sk-...
+      # MEMAYU_EMBEDDER_MODEL: text-embedding-3-small
+    volumes:
+      - memayu-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/stdout http://127.0.0.1:8080/api/health | grep -q '"status":"ready"'
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+
+volumes:
+  memayu-data:

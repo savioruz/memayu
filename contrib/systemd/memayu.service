@@ -1,0 +1,58 @@
+#
+# Memayu memory server — systemd unit example
+#
+# Place this file at /etc/systemd/system/memayu.service, adjust the paths and
+# user to match how you installed memayu, then enable it:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now memayu
+#
+# Useful commands:
+#   systemctl status memayu     # status incl. the last few log lines
+#   journalctl -u memayu -f     # follow the service logs
+#   systemctl restart memayu    # restart after editing config
+#   systemctl disable memayu    # stop auto-starting on boot
+#
+# Configuration comes from memayu's on-disk config.toml, exactly as when you run
+# `memayu serve` in a shell. memayu resolves it in this order (see
+# memayu-config::config_path):
+#   1. $MEMAYU_CONFIG            (an explicit path, if set below)
+#   2. $XDG_CONFIG_HOME/memayu/config.toml
+#   3. ~/.config/memayu/config.toml
+# Run `memayu setup` once as the service user (or copy a config.toml into place)
+# so a valid file exists before the service starts.
+#
+# This unit runs as an unprivileged `memayu` user and stores its database under
+# /var/lib/memayu. Create that directory, give the user ownership, and make sure
+# the config.toml is readable by them:
+#
+#   sudo mkdir -p /var/lib/memayu
+#   sudo useradd --system --home /var/lib/memayu memayu   (if not already present)
+#   sudo chown -R memayu:memayu /var/lib/memayu
+#   sudo -u memayu mkdir -p /home/memayu/.config/memayu
+#   sudo -u memayu cp ./memayu-config.toml /home/memayu/.config/memayu/config.toml
+#   sudo -u memayu chmod 600 /home/memayu/.config/memayu/config.toml
+#   (or copy your existing machine's config.toml there)
+
+[Unit]
+Description=Memayu memory server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust this path if you installed memayu somewhere other than /usr/local/bin.
+ExecStart=/usr/local/bin/memayu serve
+Restart=on-failure
+RestartSec=5
+User=memayu
+Group=memayu
+WorkingDirectory=/var/lib/memayu
+# Optional: point at an explicit config.toml instead of the XDG default above.
+#Environment=MEMAYU_CONFIG=/var/lib/memayu/config.toml
+# Absolute libsql path so the database always lands in the working dir. Note that
+# this overrides whatever libsql_path your config.toml sets.
+Environment=MEMAYU_LIBSQL_PATH=/var/lib/memayu/memayu.db
+
+[Install]
+WantedBy=multi-user.target

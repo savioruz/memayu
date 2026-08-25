@@ -60,6 +60,14 @@ docker run --rm -p 8080:8080 \
   ghcr.io/savioruz/memayu:latest
 ```
 
+For a persistent, restart-on-failure deployment with a data volume and a
+readiness healthcheck, see [`contrib/docker-compose.yml`](contrib/docker-compose.yml):
+
+```bash
+docker compose up -d
+docker compose logs -f
+```
+
 The server exposes an unauthenticated readiness endpoint at
 `GET /api/health`:
 
@@ -87,6 +95,42 @@ ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do \
   curl -fsS http://127.0.0.1:18080/api/health | grep -q "\"status\":\"ready\"" && exit 0; \
   sleep 1; done; exit 1'
 ```
+
+### Running as a service (systemd)
+
+To keep `memayu serve` running persistently (and restart it automatically after
+a reboot or crash), ship the example unit file:
+
+```bash
+sudo cp contrib/systemd/memayu.service /etc/systemd/system/memayu.service
+```
+
+Read the comments in that file first — it runs as an unprivileged `memayu` user
+and expects a `config.toml` in that user's config directory. Create the service
+user, data directory, and a valid `config.toml` (e.g. from `memayu setup` run as
+that user), then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now memayu
+```
+
+Useful commands:
+
+```bash
+systemctl status memayu      # status plus the last few log lines
+journalctl -u memayu -f      # follow the service logs
+systemctl restart memayu     # apply changes after editing config.toml
+systemctl disable memayu     # stop auto-starting on boot
+```
+
+The service reads the same on-disk `config.toml` that `memayu serve` uses
+(`$MEMAYU_CONFIG`, else `$XDG_CONFIG_HOME/memayu/config.toml`, else
+`~/.config/memayu/config.toml`) — no `.env` file is required. If you prefer env
+overrides, add them with `Environment=` lines in the unit or a systemd
+`EnvironmentFile=`.
+
+For help diagnosing installs, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## Usage
 
