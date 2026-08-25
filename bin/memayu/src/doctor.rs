@@ -2,11 +2,13 @@
 //!
 //! Runs a battery of non-destructive checks against the effective config:
 //! config validity, storage reachability/schema, and LLM/embedder connectivity
-//! (key validity + model availability). Exits 0 when everything is healthy and
-//! 1 when problems are found.
+//! (key validity + real test-call reachability). Exits 0 when everything is
+//! healthy and 1 when problems are found.
 //!
 //! Nothing here mutates state: storage is inspected, not opened-for-write, and
-//! providers are probed via `GET /models` rather than issuing completions.
+//! providers are probed with a real (non-mutating) completion/embedding call
+//! rather than a `GET /models` listing, so proxy gateways that don't expose
+//! `/models` are not misreported.
 
 use console::style;
 use memayu_config::{Config, StorageBackend};
@@ -60,13 +62,7 @@ pub async fn cmd_doctor(config: &Config) -> i32 {
     // ── 3. Providers ──
     if config.extraction_mode != ExtractionMode::Raw {
         println!("\n{} Checking LLM provider", section("llm"));
-        let (passed, warned) = check_provider(
-            "LLM",
-            &config.llm.base_url,
-            config.llm.api_key.as_deref(),
-            &config.llm.model,
-        )
-        .await;
+        let (passed, warned) = check_provider("LLM", &config.llm, ProviderKind::Llm).await;
         ok &= passed;
         warnings += usize::from(warned);
     }
@@ -86,13 +82,8 @@ pub async fn cmd_doctor(config: &Config) -> i32 {
         );
         println!("    model dir: {}", memayu_config::model_dir().display());
     } else {
-        let (passed, warned) = check_provider(
-            "embedder",
-            &config.embedder.base_url,
-            config.embedder.api_key.as_deref(),
-            &config.embedder.model,
-        )
-        .await;
+        let (passed, warned) =
+            check_provider("embedder", &config.embedder, ProviderKind::Embedder).await;
         ok &= passed;
         warnings += usize::from(warned);
     }
@@ -274,54 +265,68 @@ async fn inspect_storage(config: &Config) -> Result<StorageInspection, String> {
     }
 }
 
-/// Probe a provider's `GET /models` endpoint, print the outcome, and return
-/// `(passed, warned)` so the caller can fold it into the overall result.
+/// Probe a provider with a real test call (an embedding for the embedder, a
+/// completion for the LLM) rather than a `GET /models` listing, print the
+/// outcome, and return `(passed, warned)` so the caller can fold it into the
+/// overall result. A proxy that never exposes `/models` or renames the model
+/// still reports success as long as the real call works (issue #48).
 async fn check_provider(
     name: &str,
-    base_url: &str,
-    api_key: Option<&str>,
-    model: &str,
+    cfg: &memayu_config::ProviderConfig,
+    kind: ProviderKind,
 ) -> (bool, bool) {
-    match memayu_llm_client::check_models(base_url, api_key, model).await {
-        memayu_llm_client::ModelsCheck::Ok { model_available } => {
-            if model_available {
-                println!(
-                    "  {} reachable, key accepted, model \"{model}\" advertised",
-                    style("✔").green().bold()
-                );
-                (true, false)
-            } else {
-                println!(
-                    "  {} reachable, key accepted, but \"{model}\" not in /models list",
-                    style("⚠").yellow().bold()
-                );
-                (true, true)
+    match kind {
+        ProviderKind::Llm => {
+            let provider = memayu_llm_client::HttpLlmProvider::new(cfg.clone());
+            match provider.probe().await {
+                Ok(()) => {
+                    println!(
+                        "  {} reachable, key accepted, model \"{}\" answered a test completion",
+                        style("✔").green().bold(),
+                        cfg.model
+                    );
+                    (true, false)
+                }
+                Err(e) => {
+                    println!(
+                        "  {} {} failed a test completion: {}",
+                        style("✘").red().bold(),
+                        name,
+                        truncate(e)
+                    );
+                    (false, false)
+                }
             }
         }
-        memayu_llm_client::ModelsCheck::Unauthorized => {
-            println!(
-                "  {} API key rejected (401) for {name}",
-                style("✘").red().bold()
-            );
-            (false, false)
-        }
-        memayu_llm_client::ModelsCheck::Http { status, detail } => {
-            println!(
-                "  {} {name} returned HTTP {status}: {}",
-                style("✘").red().bold(),
-                truncate(detail)
-            );
-            (false, false)
-        }
-        memayu_llm_client::ModelsCheck::Unreachable(msg) => {
-            println!(
-                "  {} cannot reach {name} at {base_url}: {}",
-                style("✘").red().bold(),
-                truncate(msg)
-            );
-            (false, false)
+        ProviderKind::Embedder => {
+            let provider = memayu_llm_client::HttpEmbedderProvider::new(cfg.clone());
+            match provider.probe().await {
+                Ok(dim) => {
+                    println!(
+                        "  {} reachable, key accepted, model \"{}\" returned a {dim}-dim embedding",
+                        style("✔").green().bold(),
+                        cfg.model
+                    );
+                    (true, false)
+                }
+                Err(e) => {
+                    println!(
+                        "  {} {} failed a test embedding: {}",
+                        style("✘").red().bold(),
+                        name,
+                        truncate(e)
+                    );
+                    (false, false)
+                }
+            }
         }
     }
+}
+
+/// Which kind of provider [`check_provider`] should exercise.
+enum ProviderKind {
+    Llm,
+    Embedder,
 }
 
 fn truncate(s: String) -> String {

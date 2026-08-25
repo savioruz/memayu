@@ -9,60 +9,88 @@ use std::sync::atomic::{AtomicU16, Ordering};
 
 const EMB: [f32; 3] = [0.1, 0.2, 0.3];
 
-/// How the mock `/models` endpoint should behave.
+/// How the mock provider should answer real test calls.
 #[derive(Clone, Copy)]
-enum ModelsBehavior {
-    /// 200 with the configured model advertised.
+enum ProviderBehavior {
+    /// `/embeddings` and `/chat/completions` both succeed. There is no
+    /// `/models` endpoint at all (proxy scenario).
     Good,
-    /// 200 but the configured model is NOT advertised.
-    ModelMissing,
-    /// 401 (bad API key).
+    /// 401 on real calls (bad API key).
     Unauthorized,
+    /// 500 on real calls (provider misconfigured).
+    ServerError,
 }
 
-/// Bind an HTTP mock that answers `/models` (per `behavior`) and `/embeddings`
-/// with a fixed embedding. Returns the bound port.
-fn start_mock(behavior: ModelsBehavior) -> u16 {
+/// Bind an HTTP mock that has NO `/models` endpoint and answers the real test
+/// calls (`POST /embeddings`, `POST /chat/completions`) according to
+/// `behavior`. Returns the bound port.
+fn start_mock(behavior: ProviderBehavior) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
+            // Read the full request: headers plus Content-Length bytes of body.
             let mut buf = Vec::new();
-            let mut tmp = [0u8; 1024];
+            let mut tmp = [0u8; 2048];
             loop {
                 match stream.read(&mut tmp) {
                     Ok(0) => break,
                     Ok(n) => {
                         buf.extend_from_slice(&tmp[..n]);
-                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
+                        if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let header = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                            let content_length = header
+                                .lines()
+                                .find_map(|line| {
+                                    let mut parts = line.splitn(2, ':');
+                                    if parts
+                                        .next()
+                                        .map(|k| k.trim().eq_ignore_ascii_case("content-length"))
+                                        == Some(true)
+                                    {
+                                        parts.next()?.trim().parse::<usize>().ok()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= header_end + 4 + content_length {
+                                break;
+                            }
                         }
                     }
                     Err(_) => break,
                 }
             }
+
             let head = String::from_utf8_lossy(&buf);
             let (status, body) = if head.starts_with("GET /models") {
-                match behavior {
-                    ModelsBehavior::Good => (
-                        "200 OK",
-                        r#"{"data":[{"id":"test-embed"},{"id":"other-model"}]}"#.to_string(),
-                    ),
-                    ModelsBehavior::ModelMissing => {
-                        ("200 OK", r#"{"data":[{"id":"other-model"}]}"#.to_string())
-                    }
-                    ModelsBehavior::Unauthorized => ("401 Unauthorized", String::new()),
-                }
+                // No /models endpoint: the proxy exposes only the real call
+                // surface. This is exactly what issue #48 exercises.
+                ("404 Not Found", r#"{"error":"not found"}"#.to_string())
             } else {
-                // /embeddings
-                (
-                    "200 OK",
-                    format!(
-                        r#"{{"data":[{{"embedding":[{:.6},{:.6},{:.6}]}}]}}"#,
-                        EMB[0], EMB[1], EMB[2]
-                    ),
-                )
+                match behavior {
+                    ProviderBehavior::Good => {
+                        if head.starts_with("POST /embeddings") {
+                            (
+                                "200 OK",
+                                format!(
+                                    r#"{{"data":[{{"embedding":[{:.6},{:.6},{:.6}]}}]}}"#,
+                                    EMB[0], EMB[1], EMB[2]
+                                ),
+                            )
+                        } else {
+                            // /chat/completions
+                            (
+                                "200 OK",
+                                r#"{"choices":[{"message":{"content":"{\"decision\":\"add\",\"memory_id\":null,\"content\":\"ok\"}"}}]}"#.to_string(),
+                            )
+                        }
+                    }
+                    ProviderBehavior::Unauthorized => ("401 Unauthorized", String::new()),
+                    ProviderBehavior::ServerError => ("500 Internal Server Error", String::new()),
+                }
             };
             let resp = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -139,7 +167,7 @@ fn prime_schema(port: u16, db: &std::path::Path) {
 
 #[test]
 fn doctor_fresh_machine_exits_zero() {
-    let port = start_mock(ModelsBehavior::Good);
+    let port = start_mock(ProviderBehavior::Good);
     let db = temp_db_path(); // does not exist yet
     let (code, stdout, _) = run_doctor(port, &db, &[]);
     assert_eq!(code, 0, "fresh machine should be healthy");
@@ -148,7 +176,7 @@ fn doctor_fresh_machine_exits_zero() {
 
 #[test]
 fn doctor_used_store_exits_zero() {
-    let port = start_mock(ModelsBehavior::Good);
+    let port = start_mock(ProviderBehavior::Good);
     let db = temp_db_path();
     prime_schema(port, &db);
     let (code, stdout, _) = run_doctor(port, &db, &[]);
@@ -158,7 +186,7 @@ fn doctor_used_store_exits_zero() {
 
 #[test]
 fn doctor_bad_key_exits_one() {
-    let port = start_mock(ModelsBehavior::Unauthorized);
+    let port = start_mock(ProviderBehavior::Unauthorized);
     let db = temp_db_path();
     let (code, stdout, _) = run_doctor(port, &db, &[]);
     assert_eq!(code, 1, "rejected key must fail doctor");
@@ -166,12 +194,48 @@ fn doctor_bad_key_exits_one() {
 }
 
 #[test]
-fn doctor_model_missing_is_warning_but_healthy() {
-    let port = start_mock(ModelsBehavior::ModelMissing);
+fn doctor_proxy_without_models_endpoint_is_healthy() {
+    // The mock has no /models endpoint at all (a proxy like 9Router), yet the
+    // real embed test call succeeds. Doctor must report success (issue #48).
+    let port = start_mock(ProviderBehavior::Good);
     let db = temp_db_path();
     let (code, stdout, _) = run_doctor(port, &db, &[]);
-    assert_eq!(code, 0, "unadvertised model is only a warning");
-    assert!(stdout.contains("not in /models list"), "stdout: {stdout}");
+    assert_eq!(code, 0, "real test call must succeed through a proxy");
+    assert!(
+        stdout.contains("returned a 3-dim embedding"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn doctor_server_error_exits_one() {
+    let port = start_mock(ProviderBehavior::ServerError);
+    let db = temp_db_path();
+    let (code, stdout, _) = run_doctor(port, &db, &[]);
+    assert_eq!(code, 1, "misconfigured provider must still fail doctor");
+    assert!(stdout.contains("500"), "stdout: {stdout}");
+}
+
+#[test]
+fn doctor_llm_proxy_without_models_endpoint_is_healthy() {
+    // In llm mode doctor also exercises the LLM with a real completion. The
+    // mock has no /models endpoint, but both real calls succeed.
+    let port = start_mock(ProviderBehavior::Good);
+    let db = temp_db_path();
+    let (code, stdout, _) = run_doctor(
+        port,
+        &db,
+        &[
+            ("MEMAYU_EXTRACTION_MODE", "llm"),
+            ("MEMAYU_LLM_BASE_URL", &format!("http://127.0.0.1:{port}")),
+            ("MEMAYU_LLM_MODEL", "proxy-llm-model"),
+        ],
+    );
+    assert_eq!(code, 0, "LLM test completion must succeed through a proxy");
+    assert!(
+        stdout.contains("answered a test completion"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -185,7 +249,7 @@ fn doctor_missing_config_exits_one() {
 
 #[test]
 fn doctor_dimension_mismatch_fails() {
-    let port = start_mock(ModelsBehavior::Good);
+    let port = start_mock(ProviderBehavior::Good);
     let db = temp_db_path();
     prime_schema(port, &db); // stores dimension 3
                              // Run doctor with a conflicting configured dimension.

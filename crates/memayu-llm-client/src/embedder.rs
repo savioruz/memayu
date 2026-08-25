@@ -37,6 +37,17 @@ impl HttpEmbedderProvider {
         )
         .await
     }
+
+    /// Issue a minimal, real embedding call and return the vector dimension.
+    /// A success here means the endpoint is reachable, the key is accepted, and
+    /// the configured model answers — the same test the setup/dashboard flows
+    /// use (PRD-01 §4.2) — without consulting any `/models` listing.
+    pub async fn probe(&self) -> Result<usize, String> {
+        self.embed("dimension probe")
+            .await
+            .map(|v| v.len())
+            .map_err(|e| e.to_string())
+    }
 }
 
 fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
